@@ -123,6 +123,10 @@ int main() {
                 selected_component_type = "vsource";
                 placing_component = true;
             }
+            if (ImGui::Button("Ground", ImVec2(100, 30))) {
+                selected_component_type = "ground";
+                placing_component = true;
+            }
             ImGui::Separator();
             if (ImGui::Button("Wire Mode", ImVec2(100, 30))) {
                 wire_mode = !wire_mode;
@@ -317,29 +321,26 @@ int main() {
     return 0;
 }
 
-void drawPins(CircuitElement* component, float posx, float posy, ImDrawList* draw_list) {
+void drawPins(CircuitElement* component, ImVec2 canvas_offset, ImDrawList* draw_list) {
     for (int i = 0; i < component->getPinCount(); ++i) {
         auto positions = component->getAbsolutePinPositions();
-        ImVec2 pin_pos(positions[i].first, positions[i].second);
+        ImVec2 pin_pos(canvas_offset.x + positions[i].first, canvas_offset.y + positions[i].second);
         
         int node_id = component->getNodeForPin(i);
         
         ImU32 color;
         if (component->getType() == "ground") {
-            color = IM_COL32(0, 0, 0, 255); // Black for ground
+            color = IM_COL32(0, 0, 0, 255);
         } else if (node_id == -1) {
-            color = IM_COL32(255, 0, 0, 255); // Red for unconnected
+            color = IM_COL32(255, 0, 0, 255);
         } else if (node_id == 0) {
-            color = IM_COL32(0, 0, 0, 255); // Black for ground node
+            color = IM_COL32(0, 0, 0, 255);
         } else {
-            color = IM_COL32(0, 255, 0, 255); // Green for connected
+            color = IM_COL32(0, 255, 0, 255);
         }
         
         draw_list->AddCircleFilled(pin_pos, 4.0f, color);
         draw_list->AddCircle(pin_pos, 4.0f, IM_COL32(255, 255, 255, 255), 8, 1.0f);
-        
-        // Optional: Show pin names on hover
-        // You could add tooltip functionality here
     }
 }
 // Component drawing function
@@ -357,7 +358,7 @@ void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* 
         draw_list->AddText(ImVec2(pos.x - 10, pos.y + 10), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
         
         // Draw connection points
-       drawPins(component, pos.x, pos.y, draw_list);
+       drawPins(component, canvas_offset, draw_list);
     } else if (component->getType() == "capacitor") {
         // Draw capacitor symbol (two parallel lines)
         draw_list->AddLine(ImVec2(pos.x - 20, pos.y), ImVec2(pos.x - 5, pos.y), IM_COL32(255, 255, 255, 255), 2.0f);
@@ -368,7 +369,7 @@ void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* 
         draw_list->AddText(ImVec2(pos.x - 10, pos.y - 20), IM_COL32(255, 255, 0, 255), component->name.c_str());
         draw_list->AddText(ImVec2(pos.x - 10, pos.y + 10), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
         
-        drawPins(component, pos.x, pos.y, draw_list);
+        drawPins(component, canvas_offset, draw_list);
     } else if (component->getType() == "vsource") {
         // Draw voltage source symbol (circle)
         draw_list->AddCircle(pos, 15.0f, IM_COL32(255, 255, 255, 255), 16, 2.0f);
@@ -382,6 +383,16 @@ void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* 
         draw_list->AddText(ImVec2(pos.x - 10, pos.y - 35), IM_COL32(255, 255, 0, 255), component->name.c_str());
         draw_list->AddText(ImVec2(pos.x - 10, pos.y + 25), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
         
-        drawPins(component, pos.x, pos.y, draw_list);
+        drawPins(component, canvas_offset, draw_list);
+    } else if (component->getType() == "ground") {
+        // Draw ground symbol
+        draw_list->AddLine(ImVec2(pos.x, pos.y), ImVec2(pos.x, pos.y + 10), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x - 8, pos.y + 10), ImVec2(pos.x + 8, pos.y + 10), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x - 5, pos.y + 13), ImVec2(pos.x + 5, pos.y + 13), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x - 2, pos.y + 16), ImVec2(pos.x + 2, pos.y + 16), IM_COL32(255, 255, 255, 255), 2.0f);
+        
+        draw_list->AddText(ImVec2(pos.x - 10, pos.y - 20), IM_COL32(255, 255, 0, 255), component->name.c_str());
+        
+        drawPins(component, canvas_offset, draw_list);
     }
 }

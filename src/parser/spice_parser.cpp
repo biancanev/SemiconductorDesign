@@ -187,7 +187,9 @@ void SPICEParser::parseResistor(const std::vector<std::string>& tokens) {
     std::cout << "Resistor " << name << ": " << n1 << " to " << n2 
                 << ", R=" << resistance << " ohms" << std::endl;
     
-    auto resistor = std::make_unique<Resistor>(name, n1, n2, resistance);
+    auto resistor = std::make_unique<Resistor>(name, resistance);
+    resistor->setNodeForPin(0, n1);  // Set node for pin 1
+    resistor->setNodeForPin(1, n2);  // Set node for pin 2
     elements.push_back(std::move(resistor));
 }
 
@@ -205,7 +207,9 @@ void SPICEParser::parseCapacitor(const std::vector<std::string>& tokens) {
     std::cout << "Capacitance " << name << ": " << n1 << " to " << n2 
             << ", C=" << capacitance << " farads" << std::endl;
 
-    auto capacitor = std::make_unique<Capacitor>(name, n1, n2, capacitance);
+    auto capacitor = std::make_unique<Capacitor>(name, capacitance);
+    capacitor->setNodeForPin(0, n1);  // Set node for pin 1
+    capacitor->setNodeForPin(1, n2);  // Set node for pin 2
     elements.push_back(std::move(capacitor));
 }
 
@@ -233,7 +237,9 @@ void SPICEParser::parseVoltageSource(const std::vector<std::string>& tokens) {
     std::cout << "Voltage Source " << name << ": " << n1 << " to " << n2 
             << ", V=" << voltage << " volts" << std::endl;
     
-    auto vsource = std::make_unique<VoltageSource>(name, n1, n2, voltage);
+    auto vsource = std::make_unique<VoltageSource>(name, voltage);
+    vsource->setNodeForPin(0, n1);  // Set node for pin 1
+    vsource->setNodeForPin(1, n2);  // Set node for pin 2
     elements.push_back(std::move(vsource));
 }
 
@@ -314,7 +320,11 @@ void SPICEParser::printParsedElements() {
     for (size_t i = 0; i < elements.size(); i++) {
         const auto& element = elements[i];
         std::cout << "Element " << i << ": " << element->name 
-                  << " (nodes: " << element->node1 << "-" << element->node2 << ")" << std::endl;
+                  << " (nodes: ";
+        for(Pin pin: element->pins){
+            std::cout << pin.node_id << ", ";
+        }
+        std::cout << ")" << std::endl;
         
         // Try to identify the type
         if (!element->name.empty()) {

@@ -155,8 +155,8 @@ void TransientAnalysis::buildMNAMatrix(double currentTime) {
 }
 
 void TransientAnalysis::addResistor(const Resistor* resistor) {
-    int n1 = resistor->node1;
-    int n2 = resistor->node2;
+    int n1 = resistor->pins[0].node_id;;
+    int n2 = resistor->pins[1].node_id;;
     double conductance = 1.0 / resistor->r;
     
     // Same stamp as DC analysis
@@ -198,8 +198,8 @@ void TransientAnalysis::addResistor(const Resistor* resistor) {
 }
 
 void TransientAnalysis::addVoltageSource(const VoltageSource* vsource, double currentTime) {
-    int n1 = vsource->node1;
-    int n2 = vsource->node2;
+    int n1 = vsource->pins[0].node_id;;
+    int n2 = vsource->pins[1].node_id;;
     double voltage = vsource->v;  // For now, assume DC. Later add time-dependent sources
     
     auto it = voltageSourceIndex.find(vsource->name);
@@ -229,8 +229,8 @@ void TransientAnalysis::addVoltageSource(const VoltageSource* vsource, double cu
 }
 
 void TransientAnalysis::addCapacitor(const Capacitor* capacitor) {
-    int n1 = capacitor->node1;
-    int n2 = capacitor->node2;
+    int n1 = capacitor->pins[0].node_id;;
+    int n2 = capacitor->pins[1].node_id;;
     
     // Backward Euler: C * dv/dt ≈ C * (v_current - v_previous) / dt
     // This creates an equivalent conductance: Geq = C/dt

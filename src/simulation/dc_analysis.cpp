@@ -38,8 +38,8 @@ void DCAnalysis::addMatrixEntry(int row, int col, double value) {
 }
 
 void DCAnalysis::addResistor(const Resistor* resistor) {
-    int n1 = resistor->node1;
-    int n2 = resistor->node2;
+    int n1 = resistor->pins[0].node_id;
+    int n2 = resistor->pins[1].node_id;;
     double conductance = 1.0 / resistor->r;
     
     std::cout << "Adding resistor " << resistor->name << ": nodes " << n1 << "-" << n2 
@@ -103,8 +103,8 @@ void DCAnalysis::addResistor(const Resistor* resistor) {
 }
 
 void DCAnalysis::addVoltageSource(const VoltageSource* vsource) {
-    int n1 = vsource->node1;
-    int n2 = vsource->node2;
+    int n1 = vsource->pins[0].node_id;;
+    int n2 = vsource->pins[1].node_id;;
     double voltage = vsource->v;
     
     auto it = voltageSourceIndex.find(vsource->name);
