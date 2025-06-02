@@ -6,7 +6,6 @@
 #include <memory>
 #include "parser/circuit_element.h"
 #include "simulation/dc_analysis.h"
-#include "simulation/transient_analysis.h"
 
 
 class DCAnalysis {

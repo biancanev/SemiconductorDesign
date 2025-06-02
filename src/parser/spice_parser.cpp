@@ -136,7 +136,7 @@ void SPICEParser::parseCommand(const std::vector<std::string>& tokens) {
         TransientAnalysis transientAnalysis(elements, numNodes, *transientSettings);
         transientAnalysis.solve();
         transientAnalysis.exportResults("transient_results.csv");
-    } else if (command == ".dc") {
+    } else if (command == ".dc" || command==".op") {
         std::cout << "DC analysis specified" << std::endl;
         if (elements.empty()) {
             std::cout << "No circuit elements found. Cannot run DC analysis." << std::endl;
@@ -218,7 +218,17 @@ void SPICEParser::parseVoltageSource(const std::vector<std::string>& tokens) {
     int n1 = getNodeNumber(node1);
     int n2 = getNodeNumber(node2);
 
-    double voltage = parseValue(value);
+    double voltage = 0.0;
+
+    if (tokens.size() >= 4) {
+        if (tokens.size() >= 5 && (tokens[3] == "DC" || tokens[3] == "dc")) {
+            // Format: V1 n1 n2 DC 5V
+            voltage = parseValue(tokens[4]);
+        } else {
+            // Format: V1 n1 n2 5V
+            voltage = parseValue(tokens[3]);
+        }
+    }
 
     std::cout << "Voltage Source " << name << ": " << n1 << " to " << n2 
             << ", V=" << voltage << " volts" << std::endl;

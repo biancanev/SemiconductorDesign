@@ -1,53 +1,59 @@
 cmake_minimum_required(VERSION 3.16)
-project(CircuitSimulator VERSION 1.0.0 LANGUAGES CXX)
+project(CircuitSimulator)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Set build type if not specified
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
-endif()
+# Find packages the Linux way
+find_package(Eigen3 REQUIRED)
+find_package(PkgConfig REQUIRED)
+find_package(OpenGL REQUIRED)
 
-# Compiler-specific options
-if(MSVC)
-    add_compile_options(/W4)
-    add_compile_definitions(_USE_MATH_DEFINES)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
+# Use pkg-config to find GLFW3
+pkg_check_modules(GLFW REQUIRED glfw3)
 
-# Find Eigen3 using vcpkg's CONFIG mode
-find_package(Eigen3 CONFIG REQUIRED)
-
-# Collect source files from subdirectories
-file(GLOB SOURCES 
-    "src/*.cpp" 
-    "src/*.c"
-    "src/parser/*.cpp"
-    "src/parser/*.c"
-    "src/simulation/*.cpp"
+# Add ImGui manually
+set(IMGUI_DIR external/imgui)
+file(GLOB IMGUI_SOURCES 
+    ${IMGUI_DIR}/*.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
 )
 
-# Add include directories
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/parser
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation
+# Your sources
+set(SOURCES 
+    src/parser/spice_parser.cpp
+    src/simulation/dc_analysis.cpp
+    src/simulation/transient_analysis.cpp
 )
 
-# Create the main executable
-add_executable(${PROJECT_NAME} ${SOURCES})
+# Create executable
+add_executable(CircuitSimulator 
+    ${SOURCES}
+    ${IMGUI_SOURCES}
+    src/main.cpp
+)
 
-# Link Eigen3
-target_link_libraries(${PROJECT_NAME} PRIVATE Eigen3::Eigen)
+# Include directories
+target_include_directories(CircuitSimulator PRIVATE 
+    src/
+    src/parser/
+    src/simulation/
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+    ${GLFW_INCLUDE_DIRS}
+)
 
-# Platform-specific linking
-if(WIN32 OR MINGW)
-    # Add Windows-specific libraries here when needed
-endif()
+# Link libraries
+target_link_libraries(CircuitSimulator PRIVATE 
+    Eigen3::Eigen
+    ${GLFW_LIBRARIES}
+    OpenGL::GL
+    ${CMAKE_DL_LIBS}
+)
 
-# Print what we found (helpful for debugging)
-message(STATUS "Found ${CMAKE_CURRENT_SOURCE_DIR}")
-message(STATUS "Sources: ${SOURCES}")
-message(STATUS "Eigen3 found: ${Eigen3_FOUND}")
+# Compiler flags
+target_compile_options(CircuitSimulator PRIVATE 
+    -Wall -Wextra 
+    ${GLFW_CFLAGS_OTHER}
+)

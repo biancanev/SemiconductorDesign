@@ -2,6 +2,8 @@
   "name": "circuit-simulator",
   "version": "1.0.0",
   "dependencies": [
-    "eigen3"
+    "eigen3",
+    "glfw",
+    "glad"
   ]
 }
