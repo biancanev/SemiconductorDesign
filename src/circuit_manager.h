@@ -14,9 +14,10 @@ public:
     CircuitElement* component2;
     int pin2;
     int node_id;
+    std::vector<ImVec2> path_points; // Store the complete path in world coordinates
     
-    Wire(CircuitElement* comp1, int p1, CircuitElement* comp2, int p2, int node) 
-        : component1(comp1), pin1(p1), component2(comp2), pin2(p2), node_id(node) {}
+    Wire(CircuitElement* comp1, int p1, CircuitElement* comp2, int p2, int node, const std::vector<ImVec2>& path = {}) 
+        : component1(comp1), pin1(p1), component2(comp2), pin2(p2), node_id(node), path_points(path) {}
     
     // Get start position in world coordinates
     std::pair<float, float> getStartPos() const {
@@ -36,11 +37,35 @@ public:
         return {0, 0};
     }
     
+    // Get the complete wire path including start, intermediate points, and end
+    std::vector<ImVec2> getCompletePath() const {
+        std::vector<ImVec2> complete_path;
+        
+        // Add start point
+        auto start = getStartPos();
+        complete_path.emplace_back(start.first, start.second);
+        
+        // Add intermediate points
+        for (const auto& point : path_points) {
+            complete_path.push_back(point);
+        }
+        
+        // Add end point
+        auto end = getEndPos();
+        complete_path.emplace_back(end.first, end.second);
+        
+        return complete_path;
+    }
+    
     // Get descriptive string for debugging
     std::string getDescription() const {
-        return component1->name + "." + component1->getPinName(pin1) + 
-               " -> " + component2->name + "." + component2->getPinName(pin2) + 
-               " (node " + std::to_string(node_id) + ")";
+        std::string desc = component1->name + "." + component1->getPinName(pin1) + 
+                          " -> " + component2->name + "." + component2->getPinName(pin2) + 
+                          " (node " + std::to_string(node_id) + ")";
+        if (!path_points.empty()) {
+            desc += " [" + std::to_string(path_points.size()) + " waypoints]";
+        }
+        return desc;
     }
 };
 
@@ -201,7 +226,7 @@ public:
     }
     
     // Connect two pins with a wire
-    bool connectPins(CircuitElement* comp1, int pin1, CircuitElement* comp2, int pin2) {
+    bool connectPins(CircuitElement* comp1, int pin1, CircuitElement* comp2, int pin2, const std::vector<ImVec2>& path) {
         if (!comp1 || !comp2 || comp1 == comp2) {
             std::cerr << "Invalid components for connection" << std::endl;
             return false;
@@ -210,23 +235,23 @@ public:
         // Validate pin indices
         if (pin1 < 0 || pin1 >= comp1->getPinCount()) {
             std::cerr << "Invalid pin index " << pin1 << " for " << comp1->name 
-                      << " (has " << comp1->getPinCount() << " pins)" << std::endl;
+                    << " (has " << comp1->getPinCount() << " pins)" << std::endl;
             return false;
         }
         
         if (pin2 < 0 || pin2 >= comp2->getPinCount()) {
             std::cerr << "Invalid pin index " << pin2 << " for " << comp2->name 
-                      << " (has " << comp2->getPinCount() << " pins)" << std::endl;
+                    << " (has " << comp2->getPinCount() << " pins)" << std::endl;
             return false;
         }
         
         // Handle ground connections specially
         if (comp1->getType() == "ground") {
-            return connectToGround(comp2, pin2, comp1, pin1);
+            return connectToGround(comp2, pin2, comp1, pin1, path);
         }
         
         if (comp2->getType() == "ground") {
-            return connectToGround(comp1, pin1, comp2, pin2);
+            return connectToGround(comp1, pin1, comp2, pin2, path);
         }
         
         // Regular pin-to-pin connection
@@ -258,26 +283,26 @@ public:
         comp1->setNodeForPin(pin1, final_node_id);
         comp2->setNodeForPin(pin2, final_node_id);
         
-        // Create wire
-        auto wire = std::make_unique<Wire>(comp1, pin1, comp2, pin2, final_node_id);
+        // Create wire with path
+        auto wire = std::make_unique<Wire>(comp1, pin1, comp2, pin2, final_node_id, path);
         
         std::cout << "Connected " << comp1->name << "." << comp1->getPinName(pin1) 
-                  << " to " << comp2->name << "." << comp2->getPinName(pin2) 
-                  << " (node " << final_node_id << ")" << std::endl;
+                << " to " << comp2->name << "." << comp2->getPinName(pin2) 
+                << " (node " << final_node_id << ") with " << path.size() << " waypoints" << std::endl;
         
         wires.push_back(std::move(wire));
         return true;
     }
-    
-    // Connect a component pin to ground
-    bool connectToGround(CircuitElement* component, int pin, CircuitElement* ground_symbol, int ground_pin) {
+
+    // Add ground connection with path
+    bool connectToGround(CircuitElement* component, int pin, CircuitElement* ground_symbol, int ground_pin, const std::vector<ImVec2>& path) {
         if (!component || !ground_symbol) return false;
         
         int current_node = component->getNodeForPin(pin);
         
         if (current_node == 0) {
             std::cout << component->name << "." << component->getPinName(pin) 
-                      << " already connected to ground" << std::endl;
+                    << " already connected to ground" << std::endl;
             return false;
         }
         
@@ -291,11 +316,11 @@ public:
         
         ground_symbol->setNodeForPin(ground_pin, 0);
         
-        // Create wire to ground
-        auto wire = std::make_unique<Wire>(component, pin, ground_symbol, ground_pin, 0);
+        // Create wire to ground with path
+        auto wire = std::make_unique<Wire>(component, pin, ground_symbol, ground_pin, 0, path);
         
         std::cout << "Connected " << component->name << "." << component->getPinName(pin) 
-                  << " to ground" << std::endl;
+                << " to ground with " << path.size() << " waypoints" << std::endl;
         
         wires.push_back(std::move(wire));
         return true;

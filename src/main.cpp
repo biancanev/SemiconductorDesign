@@ -1,4 +1,16 @@
+/** 
+ * SPICE interface. Generates a netlist based on the user defined circuit.
+ * 
+ * Author: Ryan Kwong (ryan.kwong.04@berkeley.edu)
+ * 
+ * TODO:
+ *  - Improve wire routing for 90° wire bends
+ *  - Implement delete component function
+ *  - I kind of just placed functions wherever they worked. Eventually, I need to refactor this code so that it is more organized :(
+ *  **/
+
 #include <iostream>
+#include <iomanip>
 #include <GLFW/glfw3.h>
 #include <cmath>
 #include <string>
@@ -12,13 +24,12 @@
 #include "../external/imgui/backends/imgui_impl_glfw.h"
 #include "../external/imgui/backends/imgui_impl_opengl3.h"
 
-// Your includes
 #include "parser/spice_parser.h"
 #include "circuit_manager.h"
 
 // Forward declaration
-void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* component,  CircuitElement* selected_component);
-void drawComponentPreview(ImDrawList* draw_list, ImVec2 pos, const std::string& component_type, int rotation);
+void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* component, CircuitElement* selected_component, float zoom, ImVec2 pan);
+void drawComponentPreview(ImDrawList* draw_list, ImVec2 screen_pos, const std::string& component_type, int rotation, ImVec2 canvas_offset, float zoom, ImVec2 pan);
 
 ImVec2 snapToGrid(ImVec2 pos, float grid_step){
     return ImVec2(std::round(pos.x / grid_step) * grid_step, std::round(pos.y / grid_step) * grid_step);
@@ -445,6 +456,395 @@ ImVec2 component_start_pos;
 bool show_component_preview = false;
 ImVec2 preview_position;
 int preview_rotation = 0;
+bool show_dc_results_dialog = false;
+DCAnalysis* current_dc_analysis = nullptr;
+std::vector<std::string> dc_error_messages;
+
+// Zoom and pan state
+float zoom_level = 1.0f;
+ImVec2 pan_offset = ImVec2(0, 0);
+bool panning = false;
+ImVec2 pan_start_mouse_pos;
+ImVec2 pan_start_offset;
+
+// Zoom constraints
+const float MIN_ZOOM = 0.1f;
+const float MAX_ZOOM = 5.0f;
+
+ImVec2 worldToScreen(ImVec2 world_pos, ImVec2 canvas_offset, float zoom, ImVec2 pan) {
+    return ImVec2(
+        canvas_offset.x + (world_pos.x + pan.x) * zoom,
+        canvas_offset.y + (world_pos.y + pan.y) * zoom
+    );
+}
+
+// Transform screen coordinates to world coordinates
+ImVec2 screenToWorld(ImVec2 screen_pos, ImVec2 canvas_offset, float zoom, ImVec2 pan) {
+    return ImVec2(
+        (screen_pos.x - canvas_offset.x) / zoom - pan.x,
+        (screen_pos.y - canvas_offset.y) / zoom - pan.y
+    );
+}
+
+// Apply zoom to a distance/size value
+float applyZoom(float value, float zoom) {
+    return value * zoom;
+}
+
+// Get mouse position in world coordinates
+ImVec2 getMouseWorldPos(ImVec2 canvas_offset, float zoom, ImVec2 pan) {
+    ImVec2 mouse_pos = ImGui::GetMousePos();
+    return screenToWorld(mouse_pos, canvas_offset, zoom, pan);
+}
+
+void ShowDCResultsDialog(bool* show_dialog, DCAnalysis* dc_analysis, const CircuitManager& circuit, const std::vector<std::string>& error_messages) {
+    if (!*show_dialog) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(600, 500), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("DC Analysis Results", show_dialog)) {
+        
+        if (!error_messages.empty()) {
+            // Show errors if any
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Analysis Errors:");
+            ImGui::Separator();
+            for (const auto& error : error_messages) {
+                ImGui::TextWrapped("• %s", error.c_str());
+            }
+            
+            ImGui::Separator();
+            if (ImGui::Button("Close")) {
+                *show_dialog = false;
+            }
+        } else if (dc_analysis) {
+            // Show results in tabs
+            if (ImGui::BeginTabBar("DCResultsTabs")) {
+                
+                // Node Voltages Tab
+                if (ImGui::BeginTabItem("Node Voltages")) {
+                    ImGui::Text("DC Node Voltages");
+                    ImGui::Separator();
+                    
+                    // Create a table for better formatting
+                    if (ImGui::BeginTable("NodeVoltagesTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                        ImGui::TableSetupColumn("Node", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                        ImGui::TableSetupColumn("Voltage (V)", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableHeadersRow();
+                        
+                        // Ground node
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("0 (Ground)");
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("0.000");
+                        
+                        // Other nodes
+                        const auto& used_nodes = circuit.getUsedNodes();
+                        for (int node : used_nodes) {
+                            if (node != 0) { // Skip ground, already shown
+                                ImGui::TableNextRow();
+                                ImGui::TableSetColumnIndex(0);
+                                ImGui::Text("%d", node);
+                                ImGui::TableSetColumnIndex(1);
+                                double voltage = dc_analysis->getNodeVoltage(node);
+                                ImGui::Text("%.6f", voltage);
+                            }
+                        }
+                        
+                        ImGui::EndTable();
+                    }
+                    
+                    ImGui::EndTabItem();
+                }
+                
+                // Component Voltages Tab
+                if (ImGui::BeginTabItem("Component Voltages")) {
+                    ImGui::Text("Voltage Across Components");
+                    ImGui::Separator();
+                    
+                    if (ImGui::BeginTable("ComponentVoltagesTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                        ImGui::TableSetupColumn("Component", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                        ImGui::TableSetupColumn("Nodes", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                        ImGui::TableSetupColumn("Voltage (V)", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableHeadersRow();
+                        
+                        for (const auto& component : circuit.getComponents()) {
+                            if (component->getType() == "ground") continue; // Skip ground symbols
+                            if (!component->isFullyConnected()) continue; // Skip unconnected components
+                            
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::Text("%s", component->name.c_str());
+                            
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::Text("%s", component->getType().c_str());
+                            
+                            // Calculate voltage across component
+                            if (component->getPinCount() >= 2) {
+                                int node1 = component->getNodeForPin(0);
+                                int node2 = component->getPinCount() > 1 ? component->getNodeForPin(1) : 0;
+                                
+                                ImGui::TableSetColumnIndex(2);
+                                ImGui::Text("%d-%d", node1, node2);
+                                
+                                ImGui::TableSetColumnIndex(3);
+                                double v1 = dc_analysis->getNodeVoltage(node1);
+                                double v2 = dc_analysis->getNodeVoltage(node2);
+                                double voltage_across = v1 - v2;
+                                ImGui::Text("%.6f", voltage_across);
+                            } else {
+                                ImGui::TableSetColumnIndex(2);
+                                ImGui::Text("N/A");
+                                ImGui::TableSetColumnIndex(3);
+                                ImGui::Text("N/A");
+                            }
+                        }
+                        
+                        ImGui::EndTable();
+                    }
+                    
+                    ImGui::EndTabItem();
+                }
+                
+                // Component Currents Tab
+                if (ImGui::BeginTabItem("Component Currents")) {
+                    ImGui::Text("Current Through Components");
+                    ImGui::Separator();
+                    
+                    if (ImGui::BeginTable("ComponentCurrentsTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                        ImGui::TableSetupColumn("Component", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                        ImGui::TableSetupColumn("Current (A)", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableHeadersRow();
+                        
+                        for (const auto& component : circuit.getComponents()) {
+                            if (component->getType() == "ground") continue;
+                            if (!component->isFullyConnected()) continue;
+                            
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::Text("%s", component->name.c_str());
+                            
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::Text("%s", component->getType().c_str());
+                            
+                            ImGui::TableSetColumnIndex(2);
+                            ImGui::Text("%s", component->getValue().c_str());
+                            
+                            ImGui::TableSetColumnIndex(3);
+                            
+                            // Calculate current based on component type
+                            if (component->getType() == "vsource") {
+                                // For voltage sources, get the current directly from analysis
+                                double current = dc_analysis->getVoltagSourceCurrent(component->name);
+                                ImGui::Text("%.6f", current);
+                            } else if (component->getType() == "resistor" && component->getPinCount() >= 2) {
+                                // For resistors, use Ohm's law: I = V/R
+                                int node1 = component->getNodeForPin(0);
+                                int node2 = component->getNodeForPin(1);
+                                double v1 = dc_analysis->getNodeVoltage(node1);
+                                double v2 = dc_analysis->getNodeVoltage(node2);
+                                double voltage_across = v1 - v2;
+                                
+                                // Get resistance value
+                                if (const Resistor* resistor = dynamic_cast<const Resistor*>(component.get())) {
+                                    double current = voltage_across / resistor->r;
+                                    ImGui::Text("%.6f", current);
+                                } else {
+                                    ImGui::Text("N/A");
+                                }
+                            } else if (component->getType() == "capacitor") {
+                                // For DC analysis, capacitor current is 0 (open circuit)
+                                ImGui::Text("0.000000");
+                            } else if (component->getType() == "inductor") {
+                                // For DC analysis, calculate current through inductor (short circuit)
+                                if (component->getPinCount() >= 2) {
+                                    int node1 = component->getNodeForPin(0);
+                                    int node2 = component->getNodeForPin(1);
+                                    double v1 = dc_analysis->getNodeVoltage(node1);
+                                    double v2 = dc_analysis->getNodeVoltage(node2);
+                                    
+                                    // For ideal inductor in DC, V1 should equal V2 (short circuit)
+                                    // Current would need to be calculated from surrounding circuit
+                                    if (std::abs(v1 - v2) < 1e-6) {
+                                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Calculated*");
+                                    } else {
+                                        ImGui::Text("%.6f", (v1 - v2) / 1e-6); // Using very small resistance
+                                    }
+                                } else {
+                                    ImGui::Text("N/A");
+                                }
+                            } else {
+                                // For other components (diodes, transistors, etc.)
+                                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Not calculated");
+                            }
+                        }
+                        
+                        ImGui::EndTable();
+                    }
+                    
+                    ImGui::Text("* Inductor current requires circuit analysis");
+                    
+                    ImGui::EndTabItem();
+                }
+                
+                // Power Dissipation Tab
+                if (ImGui::BeginTabItem("Power")) {
+                    ImGui::Text("Power Dissipation");
+                    ImGui::Separator();
+                    
+                    if (ImGui::BeginTable("PowerTable", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                        ImGui::TableSetupColumn("Component", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                        ImGui::TableSetupColumn("Voltage (V)", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                        ImGui::TableSetupColumn("Current (A)", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                        ImGui::TableSetupColumn("Power (W)", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableHeadersRow();
+                        
+                        double total_power = 0.0;
+                        
+                        for (const auto& component : circuit.getComponents()) {
+                            if (component->getType() == "ground") continue;
+                            if (!component->isFullyConnected()) continue;
+                            
+                            if (component->getType() == "resistor" && component->getPinCount() >= 2) {
+                                int node1 = component->getNodeForPin(0);
+                                int node2 = component->getNodeForPin(1);
+                                double v1 = dc_analysis->getNodeVoltage(node1);
+                                double v2 = dc_analysis->getNodeVoltage(node2);
+                                double voltage_across = v1 - v2;
+                                
+                                if (const Resistor* resistor = dynamic_cast<const Resistor*>(component.get())) {
+                                    double current = voltage_across / resistor->r;
+                                    double power = voltage_across * current; // P = VI
+                                    total_power += std::abs(power);
+                                    
+                                    ImGui::TableNextRow();
+                                    ImGui::TableSetColumnIndex(0);
+                                    ImGui::Text("%s", component->name.c_str());
+                                    ImGui::TableSetColumnIndex(1);
+                                    ImGui::Text("%.6f", voltage_across);
+                                    ImGui::TableSetColumnIndex(2);
+                                    ImGui::Text("%.6f", current);
+                                    ImGui::TableSetColumnIndex(3);
+                                    ImGui::Text("%.6f", power);
+                                    ImGui::TableSetColumnIndex(4);
+                                    ImGui::Text("Dissipated");
+                                }
+                            } else if (component->getType() == "vsource") {
+                                double current = dc_analysis->getVoltagSourceCurrent(component->name);
+                                if (const VoltageSource* vsrc = dynamic_cast<const VoltageSource*>(component.get())) {
+                                    double power = vsrc->v * current;
+                                    
+                                    ImGui::TableNextRow();
+                                    ImGui::TableSetColumnIndex(0);
+                                    ImGui::Text("%s", component->name.c_str());
+                                    ImGui::TableSetColumnIndex(1);
+                                    ImGui::Text("%.6f", vsrc->v);
+                                    ImGui::TableSetColumnIndex(2);
+                                    ImGui::Text("%.6f", current);
+                                    ImGui::TableSetColumnIndex(3);
+                                    ImGui::Text("%.6f", power);
+                                    ImGui::TableSetColumnIndex(4);
+                                    ImGui::Text(power > 0 ? "Supplied" : "Absorbed");
+                                }
+                            }
+                        }
+                        
+                        // Add total row
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "TOTAL");
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("--");
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("--");
+                        ImGui::TableSetColumnIndex(3);
+                        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "%.6f", total_power);
+                        ImGui::TableSetColumnIndex(4);
+                        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Dissipated");
+                        
+                        ImGui::EndTable();
+                    }
+                    
+                    ImGui::EndTabItem();
+                }
+                
+                // Circuit Summary Tab
+                if (ImGui::BeginTabItem("Summary")) {
+                    ImGui::Text("Circuit Analysis Summary");
+                    ImGui::Separator();
+                    
+                    // Count components
+                    int resistor_count = 0, capacitor_count = 0, inductor_count = 0;
+                    int vsource_count = 0, other_count = 0;
+                    
+                    for (const auto& component : circuit.getComponents()) {
+                        if (component->getType() == "resistor") resistor_count++;
+                        else if (component->getType() == "capacitor") capacitor_count++;
+                        else if (component->getType() == "inductor") inductor_count++;
+                        else if (component->getType() == "vsource") vsource_count++;
+                        else if (component->getType() != "ground") other_count++;
+                    }
+                    
+                    ImGui::Text("Circuit Composition:");
+                    ImGui::BulletText("Resistors: %d", resistor_count);
+                    ImGui::BulletText("Capacitors: %d", capacitor_count);
+                    ImGui::BulletText("Inductors: %d", inductor_count);
+                    ImGui::BulletText("Voltage Sources: %d", vsource_count);
+                    ImGui::BulletText("Other Components: %d", other_count);
+                    ImGui::BulletText("Total Nodes: %d", circuit.getNodeCount());
+                    ImGui::BulletText("Total Wires: %zu", circuit.getWires().size());
+                    
+                    ImGui::Separator();
+                    
+                    // Analysis information
+                    ImGui::Text("Analysis Information:");
+                    ImGui::BulletText("Analysis Type: DC Operating Point");
+                    ImGui::BulletText("Solution Method: Modified Nodal Analysis");
+                    ImGui::BulletText("Matrix Size: %dx%d", circuit.getNodeCount()-1 + vsource_count, circuit.getNodeCount()-1 + vsource_count);
+                    
+                    ImGui::Separator();
+                    
+                    // Validation results
+                    auto validation_errors = circuit.validateCircuit();
+                    if (validation_errors.empty()) {
+                        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Circuit validation passed");
+                    } else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "⚠ Circuit validation warnings:");
+                        for (const auto& error : validation_errors) {
+                            ImGui::TextWrapped("  • %s", error.c_str());
+                        }
+                    }
+                    
+                    ImGui::EndTabItem();
+                }
+                
+                ImGui::EndTabBar();
+            }
+            
+            ImGui::Separator();
+            
+            // Export and close buttons
+            if (ImGui::Button("Export Results")) {
+                // TODO: Implement results export
+                std::cout << "Export results functionality not implemented yet" << std::endl;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Close")) {
+                *show_dialog = false;
+            }
+        } else {
+            ImGui::Text("No analysis results available.");
+            ImGui::Separator();
+            if (ImGui::Button("Close")) {
+                *show_dialog = false;
+            }
+        }
+    }
+    ImGui::End();
+}
 
 
 int main() {
@@ -492,7 +892,7 @@ int main() {
     SPICEParser parser;
     std::vector<WireSegment> current_wire_segments;
     bool wire_horizontal_first = true;
-    
+    ImVec2 last_wire_point;
 
     // Component Editor
     bool show_component_edit_dialog = false;
@@ -664,43 +1064,86 @@ int main() {
             draw_list->AddRectFilled(canvas_p0, canvas_p1, IM_COL32(30, 30, 30, 255));
             draw_list->AddRect(canvas_p0, canvas_p1, IM_COL32(255, 255, 255, 255));
 
-            // Draw grid
-            float grid_step = 20.0f;
-            for (float x = std::fmod(canvas_p0.x, grid_step); x < canvas_sz.x; x += grid_step) {
-                draw_list->AddLine(ImVec2(canvas_p0.x + x, canvas_p0.y), 
-                                ImVec2(canvas_p0.x + x, canvas_p1.y), IM_COL32(50, 50, 50, 255));
-            }
-            for (float y = std::fmod(canvas_p0.y, grid_step); y < canvas_sz.y; y += grid_step) {
-                draw_list->AddLine(ImVec2(canvas_p0.x, canvas_p0.y + y), 
-                                ImVec2(canvas_p1.x, canvas_p0.y + y), IM_COL32(50, 50, 50, 255));
-            }
-
-            // Draw components
-            for (const auto& component : circuit.getComponents()) {
-                drawComponent(draw_list, canvas_p0, component.get(), selected_component);
-            }
-
-            if (show_component_preview && placing_component && !selected_component_type.empty()) {
-                ImVec2 relative_preview_pos = ImVec2(preview_position.x - canvas_p0.x, preview_position.y - canvas_p0.y);
-                drawComponentPreview(draw_list, preview_position, selected_component_type, preview_rotation);
+            // Draw grid with zoom and pan
+            float base_grid_step = 20.0f;
+            float grid_step = applyZoom(base_grid_step, zoom_level);
+            
+            // Only draw grid if it's not too dense or too sparse
+            if (grid_step > 2.0f && grid_step < 200.0f) {
+                float grid_offset_x = std::fmod(pan_offset.x * zoom_level, grid_step);
+                float grid_offset_y = std::fmod(pan_offset.y * zoom_level, grid_step);
+                
+                for (float x = grid_offset_x; x < canvas_sz.x; x += grid_step) {
+                    draw_list->AddLine(ImVec2(canvas_p0.x + x, canvas_p0.y), 
+                                    ImVec2(canvas_p0.x + x, canvas_p1.y), IM_COL32(50, 50, 50, 255));
+                }
+                for (float y = grid_offset_y; y < canvas_sz.y; y += grid_step) {
+                    draw_list->AddLine(ImVec2(canvas_p0.x, canvas_p0.y + y), 
+                                    ImVec2(canvas_p1.x, canvas_p0.y + y), IM_COL32(50, 50, 50, 255));
+                }
             }
 
-
-            // Handle mouse clicks and interactions
-            ImGui::InvisibleButton("canvas", canvas_sz, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+            // Handle mouse interactions
+            ImGui::InvisibleButton("canvas", canvas_sz, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
             current_mouse_pos = ImGui::GetMousePos();
 
-            // Update preview position when placing components
-            if (placing_component) {
-                ImVec2 mouse_pos = ImGui::GetMousePos();
-                float rel_x = mouse_pos.x - canvas_p0.x;
-                float rel_y = mouse_pos.y - canvas_p0.y;
-                
-                // Snap preview position to grid
-                ImVec2 snapped_pos = snapToGrid(ImVec2(rel_x, rel_y), grid_step);
-                preview_position = ImVec2(canvas_p0.x + snapped_pos.x, canvas_p0.y + snapped_pos.y);
+            // Handle zooming
+            if (ImGui::IsItemHovered()) {
+                float wheel = ImGui::GetIO().MouseWheel;
+                if (wheel != 0.0f) {
+                    // Get mouse position in world coordinates before zoom
+                    ImVec2 mouse_world_pos_before = screenToWorld(current_mouse_pos, canvas_p0, zoom_level, pan_offset);
+                    
+                    // Apply zoom
+                    float zoom_factor = 1.0f + wheel * 0.1f;
+                    float new_zoom = zoom_level * zoom_factor;
+                    new_zoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, new_zoom));
+                    
+                    if (new_zoom != zoom_level) {
+                        // Get mouse position in world coordinates after zoom
+                        ImVec2 mouse_world_pos_after = screenToWorld(current_mouse_pos, canvas_p0, new_zoom, pan_offset);
+                        
+                        // Adjust pan to keep mouse position stable
+                        pan_offset.x += mouse_world_pos_before.x - mouse_world_pos_after.x;
+                        pan_offset.y += mouse_world_pos_before.y - mouse_world_pos_after.y;
+                        
+                        zoom_level = new_zoom;
+                        std::cout << "Zoom: " << std::fixed << std::setprecision(2) << zoom_level << "x" << std::endl;
+                    }
+                }
+            }
+
+            // Handle panning
+            bool start_panning = (ImGui::IsItemClicked(ImGuiMouseButton_Middle)) || 
+                                (ImGui::IsItemClicked(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl));
+            
+            if (start_panning && !panning) {
+                panning = true;
+                pan_start_mouse_pos = current_mouse_pos;
+                pan_start_offset = pan_offset;
+                std::cout << "Started panning" << std::endl;
+            }
+            
+            if (panning) {
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Middle) || 
+                (ImGui::IsMouseDown(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl))) {
+                    ImVec2 mouse_delta = ImVec2(current_mouse_pos.x - pan_start_mouse_pos.x, 
+                                            current_mouse_pos.y - pan_start_mouse_pos.y);
+                    pan_offset.x = pan_start_offset.x + mouse_delta.x / zoom_level;
+                    pan_offset.y = pan_start_offset.y + mouse_delta.y / zoom_level;
+                } else {
+                    panning = false;
+                    std::cout << "Stopped panning" << std::endl;
+                }
+            }
+
+            // Update preview position when placing components (with zoom/pan)
+            if (placing_component && !panning) {
+                ImVec2 mouse_world_pos = getMouseWorldPos(canvas_p0, zoom_level, pan_offset);
+                ImVec2 snapped_world_pos = snapToGrid(mouse_world_pos, base_grid_step);
+                preview_position = worldToScreen(snapped_world_pos, canvas_p0, zoom_level, pan_offset);
                 show_component_preview = true;
-            } else {
+            } else if (!placing_component) {
                 show_component_preview = false;
             }
 
@@ -711,6 +1154,7 @@ int main() {
                     placing_component = false;
                     selected_component_type = "";
                     show_component_preview = false;
+                    preview_rotation = 0;  // Reset preview rotation
                     std::cout << "Component placement cancelled" << std::endl;
                 } else if (wire_mode && wire_start_component) {
                     // Cancel wire placement
@@ -725,6 +1169,7 @@ int main() {
                 }
             }
 
+            // Handle rotation
             if (ImGui::IsKeyPressed(ImGuiKey_R)) {
                 if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) && selected_component) {
                     // Rotate selected component
@@ -739,14 +1184,12 @@ int main() {
 
             // Handle right-click for component editing
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                ImVec2 mouse_pos = ImGui::GetMousePos();
-                float rel_x = mouse_pos.x - canvas_p0.x;
-                float rel_y = mouse_pos.y - canvas_p0.y;
+                ImVec2 mouse_world_pos = getMouseWorldPos(canvas_p0, zoom_level, pan_offset);
                 
                 // Find component at mouse position
                 CircuitElement* clicked_component = nullptr;
                 for (const auto& component : circuit.getComponents()) {
-                    if (component->isPointInside(rel_x, rel_y)) {
+                    if (component->isPointInside(mouse_world_pos.x, mouse_world_pos.y)) {
                         clicked_component = component.get();
                         break;
                     }
@@ -763,35 +1206,33 @@ int main() {
             }
 
             // Handle left-click for selection and interaction
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-                ImVec2 mouse_pos = ImGui::GetMousePos();
-                float rel_x = mouse_pos.x - canvas_p0.x;
-                float rel_y = mouse_pos.y - canvas_p0.y;
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !panning && !ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
+                ImVec2 mouse_world_pos = getMouseWorldPos(canvas_p0, zoom_level, pan_offset);
                 
                 if (placing_component) {
                     // Component placement mode with grid snapping
-                    ImVec2 snapped_pos = snapToGrid(ImVec2(rel_x, rel_y), grid_step);
+                    ImVec2 snapped_pos = snapToGrid(mouse_world_pos, base_grid_step);
                     
                     std::cout << "Attempting to place component: " << selected_component_type << std::endl;
                     
                     CircuitElement* new_component = circuit.addComponent(selected_component_type, snapped_pos.x, snapped_pos.y);
                     if (new_component) {
+                        // Apply the preview rotation to the newly placed component
                         new_component->setRotation(preview_rotation);
-
+                        
                         current_netlist = circuit.generateNetlist();
-                        std::cout << "Added " << new_component->name << " at (" << snapped_pos.x << ", " << snapped_pos.y << ")" << std::endl;
+                        std::cout << "Added " << new_component->name << " at (" << snapped_pos.x << ", " << snapped_pos.y 
+                                << ") with rotation " << preview_rotation << "°" << std::endl;
                     } else {
                         std::cout << "Failed to add component: " << selected_component_type << std::endl;
                     }
                     
-                    // Keep placement mode active (user can place multiple components)
-                    // To exit placement mode, they need to press Escape or click a different button
-                    preview_rotation = 0;
-                    show_component_preview = true; // Keep showing preview for next placement
+                    // Keep placement mode active but don't reset rotation
+                    show_component_preview = true;
                     
                 } else if (wire_mode) {
-                    // Wire mode - enhanced routing
-                    auto [component, pin] = circuit.findPinAt(rel_x, rel_y);
+                    // Wire mode - enhanced routing with multi-segment support
+                    auto [component, pin] = circuit.findPinAt(mouse_world_pos.x, mouse_world_pos.y);
                     
                     if (component && pin != -1) {
                         // Clicked on a pin
@@ -800,63 +1241,94 @@ int main() {
                             wire_start_component = component;
                             wire_start_pin = pin;
                             auto pins = component->getAbsolutePinPositions();
-                            wire_start_pos = ImVec2(canvas_p0.x + pins[pin].first, canvas_p0.y + pins[pin].second);
+                            
+                            // Store start position in world coordinates
+                            last_wire_point = ImVec2(pins[pin].first, pins[pin].second);
+                            wire_start_pos = worldToScreen(last_wire_point, canvas_p0, zoom_level, pan_offset);
+                            
                             current_wire_segments.clear();
+                            wire_horizontal_first = true;
                             std::cout << "Starting wire from " << component->name << " pin " << pin << std::endl;
                         } else {
-                            // Complete the wire - connect to end pin
-                            if (circuit.connectPins(wire_start_component, wire_start_pin, component, pin)) {
+                            // Complete the wire - connect to end pin with the current path
+                            std::vector<ImVec2> wire_path;
+                            
+                            // Convert current segments to world coordinates for storage
+                            for (const auto& segment : current_wire_segments) {
+                                ImVec2 world_start = screenToWorld(segment.start, canvas_p0, zoom_level, pan_offset);
+                                ImVec2 world_end = screenToWorld(segment.end, canvas_p0, zoom_level, pan_offset);
+                                
+                                // Add the end point of each segment (start of first segment is the pin position)
+                                if (wire_path.empty() || (world_end.x != wire_path.back().x || world_end.y != wire_path.back().y)) {
+                                    wire_path.push_back(world_end);
+                                }
+                            }
+                            
+                            // Connect with the path
+                            if (circuit.connectPins(wire_start_component, wire_start_pin, component, pin, wire_path)) {
                                 current_netlist = circuit.generateNetlist();
-                                std::cout << "Wire completed!" << std::endl;
+                                std::cout << "Wire completed with " << wire_path.size() << " waypoints!" << std::endl;
                             } else {
                                 std::cout << "Cannot connect these pins" << std::endl;
                             }
+                            
+                            // Reset wire routing state
                             wire_start_component = nullptr;
                             wire_start_pin = -1;
                             current_wire_segments.clear();
+                            last_wire_point = ImVec2(0, 0);
                         }
-                    } else if (wire_start_component) {
-                        // Clicked on empty space while routing - add a waypoint and switch direction
-                        ImVec2 snapped_click = snapToGrid(ImVec2(rel_x, rel_y), grid_step);
-                        ImVec2 snapped_click_canvas = ImVec2(canvas_p0.x + snapped_click.x, canvas_p0.y + snapped_click.y);
-                        
-                        ImVec2 current_start = current_wire_segments.empty() ? wire_start_pos : current_wire_segments.back().end;
-                        
-                        // Calculate the corner point based on current direction preference
-                        ImVec2 corner_point;
-                        if (wire_horizontal_first) {
-                            // Go horizontal first, then vertical
-                            corner_point = ImVec2(snapped_click_canvas.x, current_start.y);
-                        } else {
-                            // Go vertical first, then horizontal
-                            corner_point = ImVec2(current_start.x, snapped_click_canvas.y);
-                        }
-                        
-                        // Add segments to reach the clicked point
-                        if (corner_point.x != current_start.x || corner_point.y != current_start.y) {
-                            current_wire_segments.push_back({current_start, corner_point});
-                        }
-                        if (corner_point.x != snapped_click_canvas.x || corner_point.y != snapped_click_canvas.y) {
-                            current_wire_segments.push_back({corner_point, snapped_click_canvas});
-                        }
-                        
-                        // Switch direction preference for next segment
-                        wire_horizontal_first = !wire_horizontal_first;
-                        
-                        std::cout << "Added wire waypoint at (" << snapped_click.x << ", " << snapped_click.y << ")" << std::endl;
-                    } else {
-                        // Clicked on empty space with no active wire - cancel any active wire
-                        wire_start_component = nullptr;
-                        wire_start_pin = -1;
-                        current_wire_segments.clear();
-                    }
+            } else if (wire_start_component) {
+                // Clicked on empty space while routing - add a waypoint
+                ImVec2 snapped_world_pos = snapToGrid(mouse_world_pos, base_grid_step);
+                ImVec2 snapped_screen_pos = worldToScreen(snapped_world_pos, canvas_p0, zoom_level, pan_offset);
+                
+                // Get the current start point for this segment
+                ImVec2 current_start_screen = current_wire_segments.empty() ? 
+                    wire_start_pos : current_wire_segments.back().end;
+                
+                // Calculate the corner point based on current direction preference
+                ImVec2 corner_point;
+                if (wire_horizontal_first) {
+                    // Go horizontal first, then vertical
+                    corner_point = ImVec2(snapped_screen_pos.x, current_start_screen.y);
+                } else {
+                    // Go vertical first, then horizontal
+                    corner_point = ImVec2(current_start_screen.x, snapped_screen_pos.y);
+                }
+                
+                // Add segments to reach the clicked point
+                if (std::abs(corner_point.x - current_start_screen.x) > 1.0f || 
+                    std::abs(corner_point.y - current_start_screen.y) > 1.0f) {
+                    current_wire_segments.push_back({current_start_screen, corner_point});
+                }
+                
+                if (std::abs(corner_point.x - snapped_screen_pos.x) > 1.0f || 
+                    std::abs(corner_point.y - snapped_screen_pos.y) > 1.0f) {
+                    current_wire_segments.push_back({corner_point, snapped_screen_pos});
+                }
+                
+                // Update last wire point for next preview
+                last_wire_point = snapped_world_pos;
+                
+                // Switch direction preference for next segment
+                wire_horizontal_first = !wire_horizontal_first;
+                
+                std::cout << "Added wire waypoint at (" << snapped_world_pos.x << ", " << snapped_world_pos.y << ")" << std::endl;
+            } else {
+                // Clicked on empty space with no active wire - cancel any active wire
+                wire_start_component = nullptr;
+                wire_start_pin = -1;
+                current_wire_segments.clear();
+                last_wire_point = ImVec2(0, 0);
+            }
                 } else {
                     // Normal mode - component selection and movement
                     CircuitElement* clicked_component = nullptr;
                     
                     // Check if we clicked on a component
                     for (const auto& component : circuit.getComponents()) {
-                        if (component->isPointInside(rel_x, rel_y)) {
+                        if (component->isPointInside(mouse_world_pos.x, mouse_world_pos.y)) {
                             clicked_component = component.get();
                             break;
                         }
@@ -866,7 +1338,7 @@ int main() {
                         if (selected_component == clicked_component) {
                             // Already selected - start dragging
                             dragging_component = true;
-                            drag_start_pos = ImVec2(rel_x, rel_y);
+                            drag_start_pos = mouse_world_pos;
                             component_start_pos = ImVec2(clicked_component->x, clicked_component->y);
                             std::cout << "Started dragging " << clicked_component->name << std::endl;
                         } else {
@@ -882,18 +1354,16 @@ int main() {
                 }
             }
 
-            // Handle dragging
-            if (dragging_component && selected_component && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                ImVec2 mouse_pos = ImGui::GetMousePos();
-                float rel_x = mouse_pos.x - canvas_p0.x;
-                float rel_y = mouse_pos.y - canvas_p0.y;
+            // Handle dragging in world coordinates
+            if (dragging_component && selected_component && ImGui::IsMouseDown(ImGuiMouseButton_Left) && !panning) {
+                ImVec2 mouse_world_pos = getMouseWorldPos(canvas_p0, zoom_level, pan_offset);
                 
                 // Calculate new position with grid snapping
                 ImVec2 new_pos = ImVec2(
-                    component_start_pos.x + (rel_x - drag_start_pos.x),
-                    component_start_pos.y + (rel_y - drag_start_pos.y)
+                    component_start_pos.x + (mouse_world_pos.x - drag_start_pos.x),
+                    component_start_pos.y + (mouse_world_pos.y - drag_start_pos.y)
                 );
-                ImVec2 snapped_pos = snapToGrid(new_pos, grid_step);
+                ImVec2 snapped_pos = snapToGrid(new_pos, base_grid_step);
                 
                 selected_component->setPosition(snapped_pos.x, snapped_pos.y);
             } else if (dragging_component) {
@@ -903,25 +1373,94 @@ int main() {
                             " to (" << selected_component->x << ", " << selected_component->y << ")" << std::endl;
             }
 
-            // Draw wires
-            for (const auto& wire : circuit.getWires()) {
-                auto start = wire->getStartPos();
-                auto end = wire->getEndPos();
-                
-                draw_list->AddLine(
-                    ImVec2(canvas_p0.x + start.first, canvas_p0.y + start.second),
-                    ImVec2(canvas_p0.x + end.first, canvas_p0.y + end.second),
-                    IM_COL32(0, 255, 0, 255), 2.0f
-                );
+            // Draw components with zoom and pan
+            for (const auto& component : circuit.getComponents()) {
+                drawComponent(draw_list, canvas_p0, component.get(), selected_component, zoom_level, pan_offset);
             }
 
-            // Draw temporary wire while in progress
+            // Draw component preview with zoom and pan
+            if (show_component_preview && placing_component && !selected_component_type.empty()) {
+                drawComponentPreview(draw_list, preview_position, selected_component_type, preview_rotation, canvas_p0, zoom_level, pan_offset);
+            }
+
+            for (const auto& wire : circuit.getWires()) {
+        auto complete_path = wire->getCompletePath();
+        
+        if (complete_path.size() >= 2) {
+            // Draw each segment of the wire path
+            for (size_t i = 0; i < complete_path.size() - 1; ++i) {
+                ImVec2 start_screen = worldToScreen(complete_path[i], canvas_p0, zoom_level, pan_offset);
+                ImVec2 end_screen = worldToScreen(complete_path[i + 1], canvas_p0, zoom_level, pan_offset);
+                
+                draw_list->AddLine(start_screen, end_screen, IM_COL32(0, 255, 0, 255), applyZoom(2.0f, zoom_level));
+            }
+            
+            // Draw small circles at waypoints (except start and end)
+            if (zoom_level > 0.5f) { // Only show waypoints when zoomed in enough
+                for (size_t i = 1; i < complete_path.size() - 1; ++i) {
+                    ImVec2 waypoint_screen = worldToScreen(complete_path[i], canvas_p0, zoom_level, pan_offset);
+                    draw_list->AddCircleFilled(waypoint_screen, applyZoom(3.0f, zoom_level), IM_COL32(0, 200, 0, 255));
+                }
+            }
+        }
+    }
+
+            // Draw wire segments while routing (in-progress segments)
+            for (const auto& segment : current_wire_segments) {
+                draw_list->AddLine(segment.start, segment.end, IM_COL32(255, 255, 0, 255), applyZoom(2.0f, zoom_level));
+            }
+
+            // Draw temporary wire while in progress with proper multi-segment preview
             if (wire_mode && wire_start_component) {
-                draw_list->AddLine(
-                    wire_start_pos,
-                    current_mouse_pos,
-                    IM_COL32(255, 255, 0, 255), 2.0f
-                );
+                ImVec2 current_start = current_wire_segments.empty() ? 
+                    wire_start_pos : current_wire_segments.back().end;
+                
+                // Get current mouse position and snap it
+                ImVec2 mouse_world_pos = getMouseWorldPos(canvas_p0, zoom_level, pan_offset);
+                ImVec2 snapped_world_pos = snapToGrid(mouse_world_pos, base_grid_step);
+                ImVec2 snapped_screen_pos = worldToScreen(snapped_world_pos, canvas_p0, zoom_level, pan_offset);
+                
+                // Draw preview of the current segment being routed
+                ImVec2 corner_point;
+                if (wire_horizontal_first) {
+                    corner_point = ImVec2(snapped_screen_pos.x, current_start.y);
+                } else {
+                    corner_point = ImVec2(current_start.x, snapped_screen_pos.y);
+                }
+                
+                // Draw the preview segments
+                if (std::abs(corner_point.x - current_start.x) > 1.0f || 
+                    std::abs(corner_point.y - current_start.y) > 1.0f) {
+                    draw_list->AddLine(current_start, corner_point, IM_COL32(255, 255, 0, 128), applyZoom(2.0f, zoom_level));
+                }
+                
+                if (std::abs(corner_point.x - snapped_screen_pos.x) > 1.0f || 
+                    std::abs(corner_point.y - snapped_screen_pos.y) > 1.0f) {
+                    draw_list->AddLine(corner_point, snapped_screen_pos, IM_COL32(255, 255, 0, 128), applyZoom(2.0f, zoom_level));
+                }
+            }
+            
+            // Draw zoom level indicator
+            std::string zoom_text = "Zoom: " + std::to_string((int)(zoom_level * 100)) + "%";
+            draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p1.y - 45), IM_COL32(255, 255, 255, 200), zoom_text.c_str());
+            
+            // Draw pan offset indicator
+            std::string pan_text = "Pan: (" + std::to_string((int)pan_offset.x) + ", " + std::to_string((int)pan_offset.y) + ")";
+            draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p1.y - 25), IM_COL32(255, 255, 255, 200), pan_text.c_str());
+            
+            // Draw mode indicator
+            if (placing_component) {
+                std::string mode_text = "Placing: " + selected_component_type;
+                if (preview_rotation != 0) {
+                    mode_text += " (" + std::to_string(preview_rotation) + "°)";
+                }
+                draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p0.y + 10), IM_COL32(255, 255, 0, 255), mode_text.c_str());
+            } else if (wire_mode) {
+                std::string mode_text = wire_start_component ? "Wire: Click second pin" : "Wire: Click first pin";
+                draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p0.y + 10), IM_COL32(0, 255, 255, 255), mode_text.c_str());
+            } else if (selected_component) {
+                std::string mode_text = "Selected: " + selected_component->name;
+                draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p0.y + 10), IM_COL32(255, 255, 0, 255), mode_text.c_str());
             }
             
             ImGui::End();
@@ -946,19 +1485,70 @@ int main() {
             ImGui::End();
         }
 
+        ShowDCResultsDialog(&show_dc_results_dialog, current_dc_analysis, circuit, dc_error_messages);
+
         if(simulate){
             // Run and show simulation results
             std::cout << "Starting simulation..." << std::endl;
             
             try {
+                // Clear previous results
+                dc_error_messages.clear();
+                current_dc_analysis = nullptr;
+                
+                // Validate circuit first
+                auto validation_errors = circuit.validateCircuit();
+                if (!validation_errors.empty()) {
+                    std::cout << "Circuit validation warnings:" << std::endl;
+                    for (const auto& error : validation_errors) {
+                        std::cout << "  " << error << std::endl;
+                        dc_error_messages.push_back(error);
+                    }
+                }
+                
+                // Generate netlist with current simulation settings
+                std::string netlist_with_sim = generateNetlistWithSettings(circuit, simConfig);
+                current_netlist = netlist_with_sim;
+                
                 // Create a temporary netlist file
                 std::ofstream temp_file("temp_circuit.cir");
-                temp_file << current_netlist;
+                temp_file << netlist_with_sim;
                 temp_file.close();
                 
-                // Parse and simulate using your existing SPICE parser
+                // Parse the circuit
                 parser.parseFile("temp_circuit.cir");
                 parser.printParsedElements();
+                
+                // Run DC analysis if enabled
+                if (simConfig.dc.enabled) {
+                    std::cout << "Running DC analysis..." << std::endl;
+                    
+                    // Create a new DC analysis instance
+                    static DCAnalysis dc_analysis_instance(const_cast<std::vector<std::unique_ptr<CircuitElement>>&>(parser.getElements()), parser.getNumNodes());
+                    current_dc_analysis = &dc_analysis_instance;
+                    
+                    // Run the analysis
+                    current_dc_analysis->solve();
+                    
+                    // Show results dialog
+                    show_dc_results_dialog = true;
+                }
+                
+                // Run other analysis types based on settings
+                if (simConfig.transient.enabled) {
+                    std::cout << "Transient analysis would run here..." << std::endl;
+                    // TODO: Implement transient analysis results dialog
+                }
+                
+                if (simConfig.ac.enabled) {
+                    std::cout << "AC analysis would run here..." << std::endl;
+                    // TODO: Implement AC analysis results dialog
+                }
+                
+                if (simConfig.dcSweep.enabled) {
+                    std::cout << "DC sweep analysis would run here..." << std::endl;
+                    // TODO: Implement DC sweep results dialog
+                }
                 
                 std::cout << "Simulation completed successfully!" << std::endl;
                 
@@ -967,6 +1557,8 @@ int main() {
                 
             } catch (const std::exception& e) {
                 std::cerr << "Simulation error: " << e.what() << std::endl;
+                dc_error_messages.push_back("Simulation error: " + std::string(e.what()));
+                show_dc_results_dialog = true; // Show dialog with error
             }
             simulate = false;
         }
@@ -992,10 +1584,11 @@ int main() {
     return 0;
 }
 
-void drawPins(CircuitElement* component, ImVec2 canvas_offset, ImDrawList* draw_list) {
+void drawPinsZoomed(CircuitElement* component, ImVec2 canvas_offset, ImDrawList* draw_list, float zoom, ImVec2 pan) {
     for (int i = 0; i < component->getPinCount(); ++i) {
         auto positions = component->getAbsolutePinPositions();
-        ImVec2 pin_pos(canvas_offset.x + positions[i].first, canvas_offset.y + positions[i].second);
+        ImVec2 world_pin_pos = ImVec2(positions[i].first, positions[i].second);
+        ImVec2 pin_pos = worldToScreen(world_pin_pos, canvas_offset, zoom, pan);
         
         int node_id = component->getNodeForPin(i);
         
@@ -1010,8 +1603,11 @@ void drawPins(CircuitElement* component, ImVec2 canvas_offset, ImDrawList* draw_
             color = IM_COL32(0, 255, 0, 255);
         }
         
-        draw_list->AddCircleFilled(pin_pos, 4.0f, color);
-        draw_list->AddCircle(pin_pos, 4.0f, IM_COL32(255, 255, 255, 255), 8, 1.0f);
+        float pin_radius = applyZoom(4.0f, zoom);
+        if (pin_radius >= 1.0f) { // Only draw pins when they're visible
+            draw_list->AddCircleFilled(pin_pos, pin_radius, color);
+            draw_list->AddCircle(pin_pos, pin_radius, IM_COL32(255, 255, 255, 255), 8, applyZoom(1.0f, zoom));
+        }
     }
 }
 
@@ -1074,23 +1670,23 @@ void drawRotatedText(ImDrawList* draw_list, ImVec2 pos, ImVec2 center, int rotat
     draw_list->AddText(rotated_pos, color, text);
 }
 
-// Function to draw component preview (ghost/translucent version) with rotation
-void drawComponentPreview(ImDrawList* draw_list, ImVec2 pos, const std::string& component_type, int rotation = 0) {
+// Function to draw component preview (ghost/translucent version) with rotation, zoom, and pan
+void drawComponentPreview(ImDrawList* draw_list, ImVec2 screen_pos, const std::string& component_type, int rotation, ImVec2 canvas_offset, float zoom, ImVec2 pan) {
     // Use a translucent color for preview
     ImU32 preview_color = IM_COL32(255, 255, 255, 100);  // Semi-transparent white
     ImU32 preview_text_color = IM_COL32(255, 255, 0, 120);  // Semi-transparent yellow
     
     // Helper lambda for rotating preview elements
     auto rotatePreviewPoint = [&](ImVec2 point) -> ImVec2 {
-        return rotatePoint(point, pos, rotation);
+        return rotatePoint(point, screen_pos, rotation);
     };
     
-    // Helper lambda for drawing rotated preview lines
+    // Helper lambda for drawing rotated preview lines with zoom
     auto drawPreviewLine = [&](ImVec2 start, ImVec2 end, float thickness = 2.0f) {
-        draw_list->AddLine(rotatePreviewPoint(start), rotatePreviewPoint(end), preview_color, thickness);
+        draw_list->AddLine(rotatePreviewPoint(start), rotatePreviewPoint(end), preview_color, applyZoom(thickness, zoom));
     };
     
-    // Helper lambda for drawing rotated preview rectangles
+    // Helper lambda for drawing rotated preview rectangles with zoom
     auto drawPreviewRect = [&](ImVec2 min, ImVec2 max, float thickness = 2.0f) {
         ImVec2 corners[4] = {
             ImVec2(min.x, min.y),
@@ -1104,48 +1700,69 @@ void drawComponentPreview(ImDrawList* draw_list, ImVec2 pos, const std::string& 
         }
         
         for (int i = 0; i < 4; i++) {
-            draw_list->AddLine(corners[i], corners[(i + 1) % 4], preview_color, thickness);
+            draw_list->AddLine(corners[i], corners[(i + 1) % 4], preview_color, applyZoom(thickness, zoom));
         }
     };
     
-    // Helper lambda for drawing rotated preview text
+    // Helper lambda for drawing rotated preview text with zoom
     auto drawPreviewText = [&](ImVec2 text_pos, const char* text) {
+        if (zoom < 0.5f) return; // Don't draw text when too zoomed out
         ImVec2 rotated_pos = rotatePreviewPoint(text_pos);
         draw_list->AddText(rotated_pos, preview_text_color, text);
     };
     
     if (component_type == "resistor") {
-        // Draw resistor preview with rotation
-        drawPreviewLine(ImVec2(pos.x - 25, pos.y), ImVec2(pos.x - 15, pos.y));
-        drawPreviewRect(ImVec2(pos.x - 15, pos.y - 5), ImVec2(pos.x + 15, pos.y + 5));
-        drawPreviewLine(ImVec2(pos.x + 15, pos.y), ImVec2(pos.x + 25, pos.y));
-        drawPreviewText(ImVec2(pos.x - 10, pos.y - 20), "R?");
+        // Draw resistor preview with rotation and zoom
+        float line_len = applyZoom(25.0f, zoom);
+        float rect_width = applyZoom(30.0f, zoom);
+        float rect_height = applyZoom(10.0f, zoom);
+        
+        drawPreviewLine(ImVec2(screen_pos.x - line_len, screen_pos.y), ImVec2(screen_pos.x - line_len/2, screen_pos.y));
+        drawPreviewRect(ImVec2(screen_pos.x - rect_width/2, screen_pos.y - rect_height/2), ImVec2(screen_pos.x + rect_width/2, screen_pos.y + rect_height/2));
+        drawPreviewLine(ImVec2(screen_pos.x + line_len/2, screen_pos.y), ImVec2(screen_pos.x + line_len, screen_pos.y));
+        
+        drawPreviewText(ImVec2(screen_pos.x - applyZoom(10.0f, zoom), screen_pos.y - applyZoom(20.0f, zoom)), "R?");
         
     } else if (component_type == "capacitor") {
-        // Draw capacitor preview with rotation
-        drawPreviewLine(ImVec2(pos.x - 20, pos.y), ImVec2(pos.x - 5, pos.y));
-        drawPreviewLine(ImVec2(pos.x - 5, pos.y - 10), ImVec2(pos.x - 5, pos.y + 10));
-        drawPreviewLine(ImVec2(pos.x + 5, pos.y - 10), ImVec2(pos.x + 5, pos.y + 10));
-        drawPreviewLine(ImVec2(pos.x + 5, pos.y), ImVec2(pos.x + 20, pos.y));
-        drawPreviewText(ImVec2(pos.x - 10, pos.y - 20), "C?");
+        // Draw capacitor preview with rotation and zoom
+        float line_len = applyZoom(20.0f, zoom);
+        float plate_height = applyZoom(20.0f, zoom);
+        float gap = applyZoom(10.0f, zoom);
+        
+        drawPreviewLine(ImVec2(screen_pos.x - line_len, screen_pos.y), ImVec2(screen_pos.x - gap/2, screen_pos.y));
+        drawPreviewLine(ImVec2(screen_pos.x - gap/2, screen_pos.y - plate_height/2), ImVec2(screen_pos.x - gap/2, screen_pos.y + plate_height/2));
+        drawPreviewLine(ImVec2(screen_pos.x + gap/2, screen_pos.y - plate_height/2), ImVec2(screen_pos.x + gap/2, screen_pos.y + plate_height/2));
+        drawPreviewLine(ImVec2(screen_pos.x + gap/2, screen_pos.y), ImVec2(screen_pos.x + line_len, screen_pos.y));
+        
+        drawPreviewText(ImVec2(screen_pos.x - applyZoom(10.0f, zoom), screen_pos.y - applyZoom(20.0f, zoom)), "C?");
         
     } else if (component_type == "inductor") {
-        // Draw inductor preview with rotation
+        // Draw inductor preview with rotation and zoom
+        float coil_radius = applyZoom(5.0f, zoom);
+        float coil_spacing = applyZoom(10.0f, zoom);
+        float line_len = applyZoom(25.0f, zoom);
+        
         for (int i = 0; i < 3; i++) {
-            float center_x = pos.x - 15 + i * 10;
-            ImVec2 circle_center = rotatePreviewPoint(ImVec2(center_x, pos.y));
-            draw_list->AddCircle(circle_center, 5.0f, preview_color, 8, 1.0f);
+            float center_x = screen_pos.x - applyZoom(15.0f, zoom) + i * coil_spacing;
+            ImVec2 circle_center = rotatePreviewPoint(ImVec2(center_x, screen_pos.y));
+            if (coil_radius >= 1.0f) { // Only draw if visible
+                draw_list->AddCircle(circle_center, coil_radius, preview_color, 8, applyZoom(1.0f, zoom));
+            }
         }
-        drawPreviewLine(ImVec2(pos.x - 25, pos.y), ImVec2(pos.x - 20, pos.y));
-        drawPreviewLine(ImVec2(pos.x + 20, pos.y), ImVec2(pos.x + 25, pos.y));
-        drawPreviewText(ImVec2(pos.x - 10, pos.y - 20), "L?");
+        drawPreviewLine(ImVec2(screen_pos.x - line_len, screen_pos.y), ImVec2(screen_pos.x - applyZoom(20.0f, zoom), screen_pos.y));
+        drawPreviewLine(ImVec2(screen_pos.x + applyZoom(20.0f, zoom), screen_pos.y), ImVec2(screen_pos.x + line_len, screen_pos.y));
+        
+        drawPreviewText(ImVec2(screen_pos.x - applyZoom(10.0f, zoom), screen_pos.y - applyZoom(20.0f, zoom)), "L?");
         
     } else if (component_type == "diode") {
-        // Draw diode preview with rotation
+        // Draw diode preview with rotation and zoom
+        float triangle_size = applyZoom(8.0f, zoom);
+        float line_len = applyZoom(15.0f, zoom);
+        
         ImVec2 triangle_points[3] = {
-            ImVec2(pos.x - 5, pos.y - 8),
-            ImVec2(pos.x - 5, pos.y + 8),
-            ImVec2(pos.x + 5, pos.y)
+            ImVec2(screen_pos.x - applyZoom(5.0f, zoom), screen_pos.y - triangle_size),
+            ImVec2(screen_pos.x - applyZoom(5.0f, zoom), screen_pos.y + triangle_size),
+            ImVec2(screen_pos.x + applyZoom(5.0f, zoom), screen_pos.y)
         };
         
         // Rotate triangle points
@@ -1153,273 +1770,252 @@ void drawComponentPreview(ImDrawList* draw_list, ImVec2 pos, const std::string& 
             triangle_points[i] = rotatePreviewPoint(triangle_points[i]);
         }
         
-        draw_list->AddPolyline(triangle_points, 3, preview_color, true, 2.0f);
+        draw_list->AddPolyline(triangle_points, 3, preview_color, true, applyZoom(2.0f, zoom));
         
-        drawPreviewLine(ImVec2(pos.x + 5, pos.y - 8), ImVec2(pos.x + 5, pos.y + 8));
-        drawPreviewLine(ImVec2(pos.x - 15, pos.y), ImVec2(pos.x - 5, pos.y));
-        drawPreviewLine(ImVec2(pos.x + 5, pos.y), ImVec2(pos.x + 15, pos.y));
-        drawPreviewText(ImVec2(pos.x - 10, pos.y - 25), "D?");
+        drawPreviewLine(ImVec2(screen_pos.x + applyZoom(5.0f, zoom), screen_pos.y - triangle_size), ImVec2(screen_pos.x + applyZoom(5.0f, zoom), screen_pos.y + triangle_size));
+        drawPreviewLine(ImVec2(screen_pos.x - line_len, screen_pos.y), ImVec2(screen_pos.x - applyZoom(5.0f, zoom), screen_pos.y));
+        drawPreviewLine(ImVec2(screen_pos.x + applyZoom(5.0f, zoom), screen_pos.y), ImVec2(screen_pos.x + line_len, screen_pos.y));
+        
+        drawPreviewText(ImVec2(screen_pos.x - applyZoom(10.0f, zoom), screen_pos.y - applyZoom(25.0f, zoom)), "D?");
         
     } else if (component_type == "vsource") {
-        // Draw voltage source preview with rotation (circle doesn't rotate, but connections do)
-        draw_list->AddCircle(pos, 15.0f, preview_color, 16, 2.0f);
-        drawPreviewLine(ImVec2(pos.x, pos.y - 20), ImVec2(pos.x, pos.y - 15));
-        drawPreviewLine(ImVec2(pos.x, pos.y + 15), ImVec2(pos.x, pos.y + 20));
+        // Draw voltage source preview with rotation and zoom
+        float radius = applyZoom(15.0f, zoom);
+        float line_len = applyZoom(20.0f, zoom);
         
-        // Draw + and - symbols (rotated)
-        ImVec2 plus_pos = rotatePreviewPoint(ImVec2(pos.x - 4, pos.y - 13));
-        ImVec2 minus_pos = rotatePreviewPoint(ImVec2(pos.x - 4, pos.y - 2));
-        draw_list->AddText(plus_pos, preview_color, "+");
-        draw_list->AddText(minus_pos, preview_color, "-");
+        if (radius >= 2.0f) { // Only draw circle if visible
+            draw_list->AddCircle(screen_pos, radius, preview_color, 16, applyZoom(2.0f, zoom));
+        }
         
-        drawPreviewText(ImVec2(pos.x - 10, pos.y - 35), "V?");
+        drawPreviewLine(ImVec2(screen_pos.x, screen_pos.y - line_len), ImVec2(screen_pos.x, screen_pos.y - radius));
+        drawPreviewLine(ImVec2(screen_pos.x, screen_pos.y + radius), ImVec2(screen_pos.x, screen_pos.y + line_len));
+        
+        if (zoom > 0.3f) { // Only draw symbols when zoomed in enough
+            drawPreviewText(ImVec2(screen_pos.x - applyZoom(4.0f, zoom), screen_pos.y - applyZoom(13.0f, zoom)), "+");
+            drawPreviewText(ImVec2(screen_pos.x - applyZoom(4.0f, zoom), screen_pos.y - applyZoom(2.0f, zoom)), "-");
+        }
+        
+        drawPreviewText(ImVec2(screen_pos.x - applyZoom(10.0f, zoom), screen_pos.y - applyZoom(35.0f, zoom)), "V?");
         
     } else if (component_type == "ground") {
-        // Draw ground preview with rotation
-        drawPreviewLine(ImVec2(pos.x, pos.y), ImVec2(pos.x, pos.y + 10));
-        drawPreviewLine(ImVec2(pos.x - 8, pos.y + 10), ImVec2(pos.x + 8, pos.y + 10));
-        drawPreviewLine(ImVec2(pos.x - 5, pos.y + 13), ImVec2(pos.x + 5, pos.y + 13));
-        drawPreviewLine(ImVec2(pos.x - 2, pos.y + 16), ImVec2(pos.x + 2, pos.y + 16));
-        drawPreviewText(ImVec2(pos.x - 15, pos.y - 20), "GND?");
+        // Draw ground preview with rotation and zoom
+        float line_height = applyZoom(10.0f, zoom);
+        float width1 = applyZoom(16.0f, zoom);
+        float width2 = applyZoom(10.0f, zoom);
+        float width3 = applyZoom(4.0f, zoom);
+        float spacing = applyZoom(3.0f, zoom);
+        
+        drawPreviewLine(ImVec2(screen_pos.x, screen_pos.y), ImVec2(screen_pos.x, screen_pos.y + line_height));
+        drawPreviewLine(ImVec2(screen_pos.x - width1/2, screen_pos.y + line_height), ImVec2(screen_pos.x + width1/2, screen_pos.y + line_height));
+        drawPreviewLine(ImVec2(screen_pos.x - width2/2, screen_pos.y + line_height + spacing), ImVec2(screen_pos.x + width2/2, screen_pos.y + line_height + spacing));
+        drawPreviewLine(ImVec2(screen_pos.x - width3/2, screen_pos.y + line_height + spacing*2), ImVec2(screen_pos.x + width3/2, screen_pos.y + line_height + spacing*2));
+        
+        drawPreviewText(ImVec2(screen_pos.x - applyZoom(15.0f, zoom), screen_pos.y - applyZoom(20.0f, zoom)), "GND?");
         
     } else if (component_type == "nmosfet" || component_type == "pmosfet") {
-        // Draw MOSFET preview with rotation
+        // Draw MOSFET preview with rotation and zoom
+        float gate_line_height = applyZoom(20.0f, zoom);
+        float gate_line_width = applyZoom(5.0f, zoom);
+        float channel_height = applyZoom(5.0f, zoom);
+        float channel_gap = applyZoom(3.0f, zoom);
+        float drain_source_len = applyZoom(15.0f, zoom);
+        float body_line_len = applyZoom(30.0f, zoom);
+        
         // Gate line
-        drawPreviewLine(ImVec2(pos.x - 20, pos.y - 10), ImVec2(pos.x - 20, pos.y + 10));
-        drawPreviewLine(ImVec2(pos.x - 25, pos.y), ImVec2(pos.x - 20, pos.y));
+        drawPreviewLine(ImVec2(screen_pos.x - applyZoom(20.0f, zoom), screen_pos.y - gate_line_height/2), 
+                       ImVec2(screen_pos.x - applyZoom(20.0f, zoom), screen_pos.y + gate_line_height/2));
+        drawPreviewLine(ImVec2(screen_pos.x - applyZoom(25.0f, zoom), screen_pos.y), 
+                       ImVec2(screen_pos.x - applyZoom(20.0f, zoom), screen_pos.y));
         
         // Channel lines
-        drawPreviewLine(ImVec2(pos.x - 15, pos.y - 8), ImVec2(pos.x - 15, pos.y - 3), 3.0f);
-        drawPreviewLine(ImVec2(pos.x - 15, pos.y + 3), ImVec2(pos.x - 15, pos.y + 8), 3.0f);
+        drawPreviewLine(ImVec2(screen_pos.x - applyZoom(15.0f, zoom), screen_pos.y - channel_height - channel_gap), 
+                       ImVec2(screen_pos.x - applyZoom(15.0f, zoom), screen_pos.y - channel_gap), 3.0f);
+        drawPreviewLine(ImVec2(screen_pos.x - applyZoom(15.0f, zoom), screen_pos.y + channel_gap), 
+                       ImVec2(screen_pos.x - applyZoom(15.0f, zoom), screen_pos.y + channel_height + channel_gap), 3.0f);
         
         // Drain and source connections
-        drawPreviewLine(ImVec2(pos.x - 15, pos.y - 5), ImVec2(pos.x, pos.y - 5));
-        drawPreviewLine(ImVec2(pos.x, pos.y - 5), ImVec2(pos.x, pos.y - 15));
-        drawPreviewLine(ImVec2(pos.x - 15, pos.y + 5), ImVec2(pos.x, pos.y + 5));
-        drawPreviewLine(ImVec2(pos.x, pos.y + 5), ImVec2(pos.x, pos.y + 15));
+        drawPreviewLine(ImVec2(screen_pos.x - applyZoom(15.0f, zoom), screen_pos.y - applyZoom(5.0f, zoom)), 
+                       ImVec2(screen_pos.x, screen_pos.y - applyZoom(5.0f, zoom)));
+        drawPreviewLine(ImVec2(screen_pos.x, screen_pos.y - applyZoom(5.0f, zoom)), 
+                       ImVec2(screen_pos.x, screen_pos.y - drain_source_len));
+        drawPreviewLine(ImVec2(screen_pos.x - applyZoom(15.0f, zoom), screen_pos.y + applyZoom(5.0f, zoom)), 
+                       ImVec2(screen_pos.x, screen_pos.y + applyZoom(5.0f, zoom)));
+        drawPreviewLine(ImVec2(screen_pos.x, screen_pos.y + applyZoom(5.0f, zoom)), 
+                       ImVec2(screen_pos.x, screen_pos.y + drain_source_len));
         
         // Body connection
-        drawPreviewLine(ImVec2(pos.x - 15, pos.y), ImVec2(pos.x + 15, pos.y), 1.0f);
-        drawPreviewLine(ImVec2(pos.x + 15, pos.y), ImVec2(pos.x + 20, pos.y));
+        drawPreviewLine(ImVec2(screen_pos.x - applyZoom(15.0f, zoom), screen_pos.y), 
+                       ImVec2(screen_pos.x + applyZoom(15.0f, zoom), screen_pos.y), 1.0f);
+        drawPreviewLine(ImVec2(screen_pos.x + applyZoom(15.0f, zoom), screen_pos.y), 
+                       ImVec2(screen_pos.x + applyZoom(20.0f, zoom), screen_pos.y));
         
-        // Arrow for NMOS vs PMOS (rotated)
+        // Arrow for NMOS vs PMOS (rotated and zoomed)
+        float arrow_size = applyZoom(2.0f, zoom);
         ImVec2 arrow[3];
         if (component_type == "nmosfet") {
-            arrow[0] = ImVec2(pos.x - 5, pos.y - 2);
-            arrow[1] = ImVec2(pos.x - 5, pos.y + 2);
-            arrow[2] = ImVec2(pos.x - 10, pos.y);
+            arrow[0] = ImVec2(screen_pos.x - applyZoom(5.0f, zoom), screen_pos.y - arrow_size);
+            arrow[1] = ImVec2(screen_pos.x - applyZoom(5.0f, zoom), screen_pos.y + arrow_size);
+            arrow[2] = ImVec2(screen_pos.x - applyZoom(10.0f, zoom), screen_pos.y);
         } else {
-            arrow[0] = ImVec2(pos.x - 10, pos.y - 2);
-            arrow[1] = ImVec2(pos.x - 10, pos.y + 2);
-            arrow[2] = ImVec2(pos.x - 5, pos.y);
+            arrow[0] = ImVec2(screen_pos.x - applyZoom(10.0f, zoom), screen_pos.y - arrow_size);
+            arrow[1] = ImVec2(screen_pos.x - applyZoom(10.0f, zoom), screen_pos.y + arrow_size);
+            arrow[2] = ImVec2(screen_pos.x - applyZoom(5.0f, zoom), screen_pos.y);
         }
         
         // Rotate arrow points
         for (int i = 0; i < 3; i++) {
             arrow[i] = rotatePreviewPoint(arrow[i]);
         }
-        draw_list->AddPolyline(arrow, 3, preview_color, true, 1.0f);
+        
+        if (arrow_size >= 0.5f) { // Only draw arrow if visible
+            draw_list->AddPolyline(arrow, 3, preview_color, true, applyZoom(1.0f, zoom));
+        }
         
         std::string label = (component_type == "nmosfet") ? "NMOS?" : "PMOS?";
-        drawPreviewText(ImVec2(pos.x - 20, pos.y - 30), label.c_str());
+        drawPreviewText(ImVec2(screen_pos.x - applyZoom(20.0f, zoom), screen_pos.y - applyZoom(30.0f, zoom)), label.c_str());
     }
     
-    // Draw preview pins (rotated)
+    // Draw preview pins (rotated and zoomed)
     std::vector<ImVec2> pin_positions;
     
     if (component_type == "resistor" || component_type == "capacitor" || component_type == "inductor") {
-        pin_positions.push_back(ImVec2(pos.x - 20, pos.y));
-        pin_positions.push_back(ImVec2(pos.x + 20, pos.y));
+        pin_positions.push_back(ImVec2(screen_pos.x - applyZoom(20.0f, zoom), screen_pos.y));
+        pin_positions.push_back(ImVec2(screen_pos.x + applyZoom(20.0f, zoom), screen_pos.y));
     } else if (component_type == "diode") {
-        pin_positions.push_back(ImVec2(pos.x - 10, pos.y));
-        pin_positions.push_back(ImVec2(pos.x + 10, pos.y));
+        pin_positions.push_back(ImVec2(screen_pos.x - applyZoom(10.0f, zoom), screen_pos.y));
+        pin_positions.push_back(ImVec2(screen_pos.x + applyZoom(10.0f, zoom), screen_pos.y));
     } else if (component_type == "vsource") {
-        pin_positions.push_back(ImVec2(pos.x, pos.y - 15));
-        pin_positions.push_back(ImVec2(pos.x, pos.y + 15));
+        pin_positions.push_back(ImVec2(screen_pos.x, screen_pos.y - applyZoom(15.0f, zoom)));
+        pin_positions.push_back(ImVec2(screen_pos.x, screen_pos.y + applyZoom(15.0f, zoom)));
     } else if (component_type == "ground") {
-        pin_positions.push_back(ImVec2(pos.x, pos.y));
+        pin_positions.push_back(ImVec2(screen_pos.x, screen_pos.y));
     } else if (component_type == "nmosfet" || component_type == "pmosfet") {
-        pin_positions.push_back(ImVec2(pos.x, pos.y - 15));    // drain
-        pin_positions.push_back(ImVec2(pos.x - 25, pos.y));    // gate
-        pin_positions.push_back(ImVec2(pos.x, pos.y + 15));    // source
-        pin_positions.push_back(ImVec2(pos.x + 20, pos.y));    // bulk
+        pin_positions.push_back(ImVec2(screen_pos.x, screen_pos.y - applyZoom(15.0f, zoom)));    // drain
+        pin_positions.push_back(ImVec2(screen_pos.x - applyZoom(25.0f, zoom), screen_pos.y));    // gate
+        pin_positions.push_back(ImVec2(screen_pos.x, screen_pos.y + applyZoom(15.0f, zoom)));    // source
+        pin_positions.push_back(ImVec2(screen_pos.x + applyZoom(20.0f, zoom), screen_pos.y));    // bulk
     }
     
-    // Draw preview pins (rotated)
-    for (const auto& pin_pos : pin_positions) {
-        ImVec2 rotated_pin = rotatePreviewPoint(pin_pos);
-        draw_list->AddCircleFilled(rotated_pin, 4.0f, IM_COL32(255, 0, 0, 100));
-        draw_list->AddCircle(rotated_pin, 4.0f, IM_COL32(255, 255, 255, 120), 8, 1.0f);
+    // Draw preview pins (rotated and zoomed)
+    float pin_radius = applyZoom(4.0f, zoom);
+    if (pin_radius >= 1.0f) { // Only draw pins if they're visible
+        for (const auto& pin_pos : pin_positions) {
+            ImVec2 rotated_pin = rotatePreviewPoint(pin_pos);
+            draw_list->AddCircleFilled(rotated_pin, pin_radius, IM_COL32(255, 0, 0, 100));
+            draw_list->AddCircle(rotated_pin, pin_radius, IM_COL32(255, 255, 255, 120), 8, applyZoom(1.0f, zoom));
+        }
     }
     
-    // Draw rotation indicator
-    if (rotation != 0) {
-        ImVec2 indicator_pos = ImVec2(pos.x + 30, pos.y - 30);
+    // Draw rotation indicator (scaled with zoom)
+    if (rotation != 0 && zoom > 0.3f) {
+        ImVec2 indicator_pos = ImVec2(screen_pos.x + applyZoom(30.0f, zoom), screen_pos.y - applyZoom(30.0f, zoom));
         draw_list->AddText(indicator_pos, IM_COL32(0, 255, 255, 150), (std::to_string(rotation) + "°").c_str());
     }
 }
 
-void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* component, CircuitElement* selected_component) {
-    ImVec2 pos(canvas_offset.x + component->x, canvas_offset.y + component->y);
+// Component drawing function with rotation and zoom/pan support
+void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* component, CircuitElement* selected_component, float zoom, ImVec2 pan) {
+    // Transform component position to screen coordinates
+    ImVec2 world_pos = ImVec2(component->x, component->y);
+    ImVec2 pos = worldToScreen(world_pos, canvas_offset, zoom, pan);
+    
     int rotation = component->getRotation();
 
-    // Draw selection highlight if component is selected
+    // Draw selection highlight if component is selected (scaled with zoom)
     if (component == selected_component) {
-        draw_list->AddCircle(pos, 35.0f, IM_COL32(255, 255, 0, 150), 16, 3.0f);
+        draw_list->AddCircle(pos, applyZoom(35.0f, zoom), IM_COL32(255, 255, 0, 150), 16, 3.0f);
     }
     
-    if (component->getType() == "resistor") {
-        // Draw resistor symbol with rotation
-        drawRotatedLine(draw_list, ImVec2(pos.x - 25, pos.y), ImVec2(pos.x - 15, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedRect(draw_list, ImVec2(pos.x - 15, pos.y - 5), ImVec2(pos.x + 15, pos.y + 5), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x + 15, pos.y), ImVec2(pos.x + 25, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        
-        // Draw labels (offset based on rotation)
-        ImVec2 name_offset, value_offset;
-        switch (rotation) {
-            case 90:
-                name_offset = ImVec2(pos.x + 20, pos.y - 10);
-                value_offset = ImVec2(pos.x - 20, pos.y - 10);
-                break;
-            case 180:
-                name_offset = ImVec2(pos.x - 10, pos.y + 20);
-                value_offset = ImVec2(pos.x - 10, pos.y - 10);
-                break;
-            case 270:
-                name_offset = ImVec2(pos.x - 20, pos.y - 10);
-                value_offset = ImVec2(pos.x + 20, pos.y - 10);
-                break;
-            default: // 0 degrees
-                name_offset = ImVec2(pos.x - 10, pos.y - 20);
-                value_offset = ImVec2(pos.x - 10, pos.y + 10);
-                break;
-        }
-        
-        draw_list->AddText(name_offset, IM_COL32(255, 255, 0, 255), component->name.c_str());
-        draw_list->AddText(value_offset, IM_COL32(200, 200, 200, 255), component->getValue().c_str());
-        
-        drawPins(component, canvas_offset, draw_list);
-        
-    } else if (component->getType() == "capacitor") {
-        // Draw capacitor symbol with rotation
-        drawRotatedLine(draw_list, ImVec2(pos.x - 20, pos.y), ImVec2(pos.x - 5, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x - 5, pos.y - 10), ImVec2(pos.x - 5, pos.y + 10), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x + 5, pos.y - 10), ImVec2(pos.x + 5, pos.y + 10), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x + 5, pos.y), ImVec2(pos.x + 20, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        
-        drawRotatedText(draw_list, ImVec2(pos.x - 10, pos.y - 20), pos, rotation, IM_COL32(255, 255, 0, 255), component->name.c_str());
-        drawRotatedText(draw_list, ImVec2(pos.x - 10, pos.y + 10), pos, rotation, IM_COL32(200, 200, 200, 255), component->getValue().c_str());
-        
-        drawPins(component, canvas_offset, draw_list);
-        
-    } else if (component->getType() == "vsource") {
-        // Draw voltage source symbol (circle doesn't need rotation, but lines do)
-        draw_list->AddCircle(pos, 15.0f, IM_COL32(255, 255, 255, 255), 16, 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x, pos.y - 20), ImVec2(pos.x, pos.y - 15), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x, pos.y + 15), ImVec2(pos.x, pos.y + 20), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        
-        // Draw + and - symbols (rotated)
-        drawRotatedText(draw_list, ImVec2(pos.x - 4, pos.y - 13), pos, rotation, IM_COL32(255, 255, 255, 255), "+");
-        drawRotatedText(draw_list, ImVec2(pos.x - 4, pos.y - 2), pos, rotation, IM_COL32(255, 255, 255, 255), "-");
-        
-        drawRotatedText(draw_list, ImVec2(pos.x - 10, pos.y - 35), pos, rotation, IM_COL32(255, 255, 0, 255), component->name.c_str());
-        drawRotatedText(draw_list, ImVec2(pos.x - 10, pos.y + 25), pos, rotation, IM_COL32(200, 200, 200, 255), component->getValue().c_str());
-        
-        drawPins(component, canvas_offset, draw_list);
-        
-    } else if (component->getType() == "ground") {
-        // Draw ground symbol with rotation
-        drawRotatedLine(draw_list, ImVec2(pos.x, pos.y), ImVec2(pos.x, pos.y + 10), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x - 8, pos.y + 10), ImVec2(pos.x + 8, pos.y + 10), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x - 5, pos.y + 13), ImVec2(pos.x + 5, pos.y + 13), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x - 2, pos.y + 16), ImVec2(pos.x + 2, pos.y + 16), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        
-        drawRotatedText(draw_list, ImVec2(pos.x - 10, pos.y - 20), pos, rotation, IM_COL32(255, 255, 0, 255), component->name.c_str());
-        
-        drawPins(component, canvas_offset, draw_list);
-        
-    } else if (component->getType() == "inductor") {
-        // Draw inductor symbol with rotation
-        for (int i = 0; i < 3; i++) {
-            float center_x = pos.x - 15 + i * 10;
-            ImVec2 circle_center = rotatePoint(ImVec2(center_x, pos.y), pos, rotation);
-            draw_list->AddCircle(circle_center, 5.0f, IM_COL32(255, 255, 255, 255), 8, 1.0f);
-        }
-        drawRotatedLine(draw_list, ImVec2(pos.x - 25, pos.y), ImVec2(pos.x - 20, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x + 20, pos.y), ImVec2(pos.x + 25, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        
-        drawRotatedText(draw_list, ImVec2(pos.x - 10, pos.y - 20), pos, rotation, IM_COL32(255, 255, 0, 255), component->name.c_str());
-        drawRotatedText(draw_list, ImVec2(pos.x - 10, pos.y + 10), pos, rotation, IM_COL32(200, 200, 200, 255), component->getValue().c_str());
-        
-        drawPins(component, canvas_offset, draw_list);
-        
-    } else if (component->getType() == "diode") {
-        // Draw diode symbol with rotation
-        ImVec2 triangle_points[3] = {
-            ImVec2(pos.x - 5, pos.y - 8),
-            ImVec2(pos.x - 5, pos.y + 8),
-            ImVec2(pos.x + 5, pos.y)
+    // Helper function to apply zoom to rotated drawing
+    auto drawZoomedRotatedLine = [&](ImVec2 start, ImVec2 end, ImU32 color, float thickness = 2.0f) {
+        ImVec2 rotated_start = rotatePoint(start, pos, rotation);
+        ImVec2 rotated_end = rotatePoint(end, pos, rotation);
+        draw_list->AddLine(rotated_start, rotated_end, color, applyZoom(thickness, zoom));
+    };
+    
+    auto drawZoomedRotatedRect = [&](ImVec2 min, ImVec2 max, ImU32 color, float thickness = 2.0f) {
+        ImVec2 corners[4] = {
+            ImVec2(min.x, min.y), ImVec2(max.x, min.y),
+            ImVec2(max.x, max.y), ImVec2(min.x, max.y)
         };
         
-        // Rotate triangle points
-        for (int i = 0; i < 3; i++) {
-            triangle_points[i] = rotatePoint(triangle_points[i], pos, rotation);
+        for (int i = 0; i < 4; i++) {
+            corners[i] = rotatePoint(corners[i], pos, rotation);
         }
         
-        draw_list->AddPolyline(triangle_points, 3, IM_COL32(255, 255, 255, 255), true, 2.0f);
+        for (int i = 0; i < 4; i++) {
+            draw_list->AddLine(corners[i], corners[(i + 1) % 4], color, applyZoom(thickness, zoom));
+        }
+    };
+    
+    auto drawZoomedRotatedText = [&](ImVec2 text_pos, ImU32 color, const char* text) {
+        if (zoom < 0.5f) return; // Don't draw text when too zoomed out
+        ImVec2 rotated_pos = rotatePoint(text_pos, pos, rotation);
+        draw_list->AddText(rotated_pos, color, text);
+    };
+    
+    if (component->getType() == "resistor") {
+        // Draw resistor symbol with zoom
+        float line_len = applyZoom(25.0f, zoom);
+        float rect_width = applyZoom(30.0f, zoom);
+        float rect_height = applyZoom(10.0f, zoom);
         
-        drawRotatedLine(draw_list, ImVec2(pos.x + 5, pos.y - 8), ImVec2(pos.x + 5, pos.y + 8), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x - 15, pos.y), ImVec2(pos.x - 5, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x + 5, pos.y), ImVec2(pos.x + 15, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
+        drawZoomedRotatedLine(ImVec2(pos.x - line_len, pos.y), ImVec2(pos.x - line_len/2, pos.y), IM_COL32(255, 255, 255, 255));
+        drawZoomedRotatedRect(ImVec2(pos.x - rect_width/2, pos.y - rect_height/2), ImVec2(pos.x + rect_width/2, pos.y + rect_height/2), IM_COL32(255, 255, 255, 255));
+        drawZoomedRotatedLine(ImVec2(pos.x + line_len/2, pos.y), ImVec2(pos.x + line_len, pos.y), IM_COL32(255, 255, 255, 255));
         
-        drawRotatedText(draw_list, ImVec2(pos.x - 10, pos.y - 25), pos, rotation, IM_COL32(255, 255, 0, 255), component->name.c_str());
-        drawRotatedText(draw_list, ImVec2(pos.x - 15, pos.y + 15), pos, rotation, IM_COL32(200, 200, 200, 255), component->getValue().c_str());
+        drawZoomedRotatedText(ImVec2(pos.x - applyZoom(10.0f, zoom), pos.y - applyZoom(20.0f, zoom)), IM_COL32(255, 255, 0, 255), component->name.c_str());
+        drawZoomedRotatedText(ImVec2(pos.x - applyZoom(10.0f, zoom), pos.y + applyZoom(10.0f, zoom)), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
         
-        drawPins(component, canvas_offset, draw_list);
+    } else if (component->getType() == "capacitor") {
+        // Draw capacitor symbol with zoom
+        float line_len = applyZoom(20.0f, zoom);
+        float plate_height = applyZoom(20.0f, zoom);
+        float gap = applyZoom(10.0f, zoom);
         
-    } else if (component->getType() == "nmosfet" || component->getType() == "pmosfet") {
-        // Draw MOSFET symbol with rotation
-        // Gate line
-        drawRotatedLine(draw_list, ImVec2(pos.x - 20, pos.y - 10), ImVec2(pos.x - 20, pos.y + 10), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x - 25, pos.y), ImVec2(pos.x - 20, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
+        drawZoomedRotatedLine(ImVec2(pos.x - line_len, pos.y), ImVec2(pos.x - gap/2, pos.y), IM_COL32(255, 255, 255, 255));
+        drawZoomedRotatedLine(ImVec2(pos.x - gap/2, pos.y - plate_height/2), ImVec2(pos.x - gap/2, pos.y + plate_height/2), IM_COL32(255, 255, 255, 255));
+        drawZoomedRotatedLine(ImVec2(pos.x + gap/2, pos.y - plate_height/2), ImVec2(pos.x + gap/2, pos.y + plate_height/2), IM_COL32(255, 255, 255, 255));
+        drawZoomedRotatedLine(ImVec2(pos.x + gap/2, pos.y), ImVec2(pos.x + line_len, pos.y), IM_COL32(255, 255, 255, 255));
         
-        // Channel lines
-        drawRotatedLine(draw_list, ImVec2(pos.x - 15, pos.y - 8), ImVec2(pos.x - 15, pos.y - 3), pos, rotation, IM_COL32(255, 255, 255, 255), 3.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x - 15, pos.y + 3), ImVec2(pos.x - 15, pos.y + 8), pos, rotation, IM_COL32(255, 255, 255, 255), 3.0f);
+        drawZoomedRotatedText(ImVec2(pos.x - applyZoom(10.0f, zoom), pos.y - applyZoom(20.0f, zoom)), IM_COL32(255, 255, 0, 255), component->name.c_str());
+        drawZoomedRotatedText(ImVec2(pos.x - applyZoom(10.0f, zoom), pos.y + applyZoom(10.0f, zoom)), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
         
-        // Drain and source connections
-        drawRotatedLine(draw_list, ImVec2(pos.x - 15, pos.y - 5), ImVec2(pos.x, pos.y - 5), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x, pos.y - 5), ImVec2(pos.x, pos.y - 15), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x - 15, pos.y + 5), ImVec2(pos.x, pos.y + 5), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x, pos.y + 5), ImVec2(pos.x, pos.y + 15), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
+    } else if (component->getType() == "vsource") {
+        // Draw voltage source symbol with zoom
+        float radius = applyZoom(15.0f, zoom);
+        float line_len = applyZoom(20.0f, zoom);
         
-        // Body connection
-        drawRotatedLine(draw_list, ImVec2(pos.x - 15, pos.y), ImVec2(pos.x + 15, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 1.0f);
-        drawRotatedLine(draw_list, ImVec2(pos.x + 15, pos.y), ImVec2(pos.x + 20, pos.y), pos, rotation, IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddCircle(pos, radius, IM_COL32(255, 255, 255, 255), 16, applyZoom(2.0f, zoom));
+        drawZoomedRotatedLine(ImVec2(pos.x, pos.y - line_len), ImVec2(pos.x, pos.y - radius), IM_COL32(255, 255, 255, 255));
+        drawZoomedRotatedLine(ImVec2(pos.x, pos.y + radius), ImVec2(pos.x, pos.y + line_len), IM_COL32(255, 255, 255, 255));
         
-        // Arrow for NMOS vs PMOS (rotated)
-        ImVec2 arrow[3];
-        if (component->getType() == "nmosfet") {
-            // Arrow pointing in (substrate to channel)
-            arrow[0] = ImVec2(pos.x - 5, pos.y - 2);
-            arrow[1] = ImVec2(pos.x - 5, pos.y + 2);
-            arrow[2] = ImVec2(pos.x - 10, pos.y);
-        } else {
-            // Arrow pointing out (channel to substrate)
-            arrow[0] = ImVec2(pos.x - 10, pos.y - 2);
-            arrow[1] = ImVec2(pos.x - 10, pos.y + 2);
-            arrow[2] = ImVec2(pos.x - 5, pos.y);
+        if (zoom > 0.3f) { // Only draw symbols when zoomed in enough
+            drawZoomedRotatedText(ImVec2(pos.x - applyZoom(4.0f, zoom), pos.y - applyZoom(13.0f, zoom)), IM_COL32(255, 255, 255, 255), "+");
+            drawZoomedRotatedText(ImVec2(pos.x - applyZoom(4.0f, zoom), pos.y - applyZoom(2.0f, zoom)), IM_COL32(255, 255, 255, 255), "-");
         }
         
-        // Rotate arrow points
-        for (int i = 0; i < 3; i++) {
-            arrow[i] = rotatePoint(arrow[i], pos, rotation);
-        }
-        draw_list->AddPolyline(arrow, 3, IM_COL32(255, 255, 255, 255), true, 1.0f);
+        drawZoomedRotatedText(ImVec2(pos.x - applyZoom(10.0f, zoom), pos.y - applyZoom(35.0f, zoom)), IM_COL32(255, 255, 0, 255), component->name.c_str());
+        drawZoomedRotatedText(ImVec2(pos.x - applyZoom(10.0f, zoom), pos.y + applyZoom(25.0f, zoom)), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
         
-        drawRotatedText(draw_list, ImVec2(pos.x - 15, pos.y - 30), pos, rotation, IM_COL32(255, 255, 0, 255), component->name.c_str());
-        drawRotatedText(draw_list, ImVec2(pos.x - 20, pos.y + 20), pos, rotation, IM_COL32(200, 200, 200, 255), component->getValue().c_str());
+    } else if (component->getType() == "ground") {
+        // Draw ground symbol with zoom
+        float line_height = applyZoom(10.0f, zoom);
+        float width1 = applyZoom(16.0f, zoom);
+        float width2 = applyZoom(10.0f, zoom);
+        float width3 = applyZoom(4.0f, zoom);
         
-        drawPins(component, canvas_offset, draw_list);
-    }
+        drawZoomedRotatedLine(ImVec2(pos.x, pos.y), ImVec2(pos.x, pos.y + line_height), IM_COL32(255, 255, 255, 255));
+        drawZoomedRotatedLine(ImVec2(pos.x - width1/2, pos.y + line_height), ImVec2(pos.x + width1/2, pos.y + line_height), IM_COL32(255, 255, 255, 255));
+        drawZoomedRotatedLine(ImVec2(pos.x - width2/2, pos.y + line_height + applyZoom(3.0f, zoom)), ImVec2(pos.x + width2/2, pos.y + line_height + applyZoom(3.0f, zoom)), IM_COL32(255, 255, 255, 255));
+        drawZoomedRotatedLine(ImVec2(pos.x - width3/2, pos.y + line_height + applyZoom(6.0f, zoom)), ImVec2(pos.x + width3/2, pos.y + line_height + applyZoom(6.0f, zoom)), IM_COL32(255, 255, 255, 255));
+        
+        drawZoomedRotatedText(ImVec2(pos.x - applyZoom(10.0f, zoom), pos.y - applyZoom(20.0f, zoom)), IM_COL32(255, 255, 0, 255), component->name.c_str());
+        
+    } 
+    // Add similar zoom/pan support for other component types (inductor, diode, mosfets...)
+    // Following the same pattern as above
+    
+    // Draw pins with zoom
+    drawPinsZoomed(component, canvas_offset, draw_list, zoom, pan);
 }

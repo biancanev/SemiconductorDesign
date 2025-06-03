@@ -42,6 +42,7 @@ private:
     void addMatrixEntry(int row, int col, double value);
     bool gaussianElimination();
     void printMatrix() const;
+    void reset();
 };
 
 #endif

@@ -4,15 +4,24 @@ project(CircuitSimulator)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find packages the Linux way
-find_package(Eigen3 REQUIRED)
-find_package(PkgConfig REQUIRED)
-find_package(OpenGL REQUIRED)
+# Platform-specific package finding
+if(WIN32)
+    # Windows-specific configuration
+    find_package(OpenGL REQUIRED)
+    
+    # Use vcpkg for Windows - note the different case
+    find_package(glfw3 CONFIG REQUIRED)
+    
+else()
+    # Linux-specific configuration
+    find_package(PkgConfig REQUIRED)
+    find_package(OpenGL REQUIRED)
+    
+    # Use pkg-config to find GLFW3 on Linux
+    pkg_check_modules(GLFW REQUIRED glfw3)
+endif()
 
-# Use pkg-config to find GLFW3
-pkg_check_modules(GLFW REQUIRED glfw3)
-
-# Add ImGui manually
+# Add ImGui manually (cross-platform)
 set(IMGUI_DIR external/imgui)
 file(GLOB IMGUI_SOURCES 
     ${IMGUI_DIR}/*.cpp
@@ -41,25 +50,38 @@ target_include_directories(CircuitSimulator PRIVATE
     src/simulation/
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
-    ${GLFW_INCLUDE_DIRS}
 )
 
-# Link libraries
-target_link_libraries(CircuitSimulator PRIVATE 
-    Eigen3::Eigen
-    ${GLFW_LIBRARIES}
-    OpenGL::GL
-    ${CMAKE_DL_LIBS}
-)
+# Platform-specific linking
+if(WIN32)
+    # On Windows with vcpkg, use the target directly
+    target_link_libraries(CircuitSimulator PRIVATE 
+        glfw  # This is the vcpkg target name
+        OpenGL::GL
+    )
+    
+    # Windows-specific compile definitions
+    target_compile_definitions(CircuitSimulator PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+    )
+    
+else()
+    # Linux linking
+    target_include_directories(CircuitSimulator PRIVATE ${GLFW_INCLUDE_DIRS})
+    target_link_libraries(CircuitSimulator PRIVATE 
+        ${GLFW_LIBRARIES}
+        OpenGL::GL
+        ${CMAKE_DL_LIBS}
+    )
+endif()
 
 # Compiler flags
-target_compile_options(CircuitSimulator PRIVATE 
-    -Wall -Wextra 
-    ${GLFW_CFLAGS_OTHER}
-)
-
-if (MSVC)
-    add_compile_options(/W0)
+if(WIN32 AND MSVC)
+    target_compile_options(CircuitSimulator PRIVATE /W0)
 else()
-    add_compile_options(-w)
+    target_compile_options(CircuitSimulator PRIVATE 
+        -Wall -Wextra -w
+        ${GLFW_CFLAGS_OTHER}
+    )
 endif()

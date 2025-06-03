@@ -37,6 +37,15 @@ class SPICEParser{
         //void parseCurrentSource(const std::vector<std::string>& tokens);
         //void parseMOSFET(const std::vector<std::string>& tokens);
 
+        
+        const std::vector<std::unique_ptr<CircuitElement>>& getElements() const { 
+            return elements; 
+        }
+        
+        int getNumNodes() const { 
+            return numNodes; 
+        }
+
 };
 
 class SPICETokenizer{

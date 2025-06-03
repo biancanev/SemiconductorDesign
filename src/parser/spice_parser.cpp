@@ -62,6 +62,9 @@ void SPICETokenizer::loadFile(const std::string& filename) {
 }
 
 void SPICEParser::parseFile(const std::string& filename) {
+    elements.clear();
+    nodeMap.clear();
+    
     SPICETokenizer tokenizer;
     tokenizer.loadFile(filename);
     

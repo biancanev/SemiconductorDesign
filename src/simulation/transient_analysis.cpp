@@ -546,7 +546,6 @@ void TransientAnalysis::addPMOSFETTransient(const PMOSFET* mosfet) {
     double vsd_prev = vs_prev - vd_prev;  // Source-drain for PMOS
     
     // For simplicity, use similar small-signal model as NMOS
-    // In practice, you'd implement the specific PMOS equations
     double gm = 50e-6;  // Simplified transconductance
     double gds = 1e-6;  // Simplified output conductance
     
@@ -557,9 +556,6 @@ void TransientAnalysis::addPMOSFETTransient(const PMOSFET* mosfet) {
 }
 
 double TransientAnalysis::getInductorPreviousCurrent(const Inductor* inductor) {
-    // In a complete implementation, you would maintain a separate data structure
-    // to track inductor currents at each time step
-    // For now, return 0.0 as a placeholder
     
     // TODO: Implement inductor current history tracking
     return 0.0;

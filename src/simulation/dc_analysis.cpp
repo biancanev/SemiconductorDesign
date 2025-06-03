@@ -103,6 +103,7 @@ void DCAnalysis::addResistor(const Resistor* resistor) {
 }
 
 void DCAnalysis::addVoltageSource(const VoltageSource* vsource) {
+    std::cout << "BEFORE adding voltage source - Matrix entries:" << std::endl;
     int n1 = vsource->pins[0].node_id;;
     int n2 = vsource->pins[1].node_id;;
     double voltage = vsource->v;
@@ -113,6 +114,14 @@ void DCAnalysis::addVoltageSource(const VoltageSource* vsource) {
         return;
     }
     int vsIndex = it->second;
+
+    std::cout << "BEFORE adding voltage source - Matrix entries:" << std::endl;
+    if (n1 != 0) {
+        int node_idx = n1 - 1;
+        std::cout << "  G[" << node_idx << "][" << vsIndex << "] = " << G[node_idx][vsIndex] << std::endl;
+        std::cout << "  G[" << vsIndex << "][" << node_idx << "] = " << G[vsIndex][node_idx] << std::endl;
+    }
+    
     
     std::cout << "Adding voltage source " << vsource->name << ": nodes " << n1 << "-" << n2 
               << ", V=" << voltage << " V, index=" << vsIndex << std::endl;
@@ -144,6 +153,13 @@ void DCAnalysis::addVoltageSource(const VoltageSource* vsource) {
     if (vsIndex >= 0 && vsIndex < matrixSize) {
         std::cout << "  Setting b[" << vsIndex << "] = " << voltage << std::endl;
         b[vsIndex] = voltage;
+    }
+
+    std::cout << "AFTER adding voltage source - Matrix entries:" << std::endl;
+    if (n1 != 0) {
+        int node_idx = n1 - 1;
+        std::cout << "  G[" << node_idx << "][" << vsIndex << "] = " << G[node_idx][vsIndex] << std::endl;
+        std::cout << "  G[" << vsIndex << "][" << node_idx << "] = " << G[vsIndex][node_idx] << std::endl;
     }
     
     std::cout << "  Voltage source stamp completed." << std::endl;
@@ -311,6 +327,8 @@ void DCAnalysis::addMOSFET(const NMOSFET* mosfet) {
 
 void DCAnalysis::buildMNAMatrix() {
     std::cout << "Building MNA matrix..." << std::endl;
+
+    reset();
     
     // Clear matrix
     for (int i = 0; i < matrixSize; i++) {
@@ -421,6 +439,7 @@ bool DCAnalysis::gaussianElimination() {
 }
 
 void DCAnalysis::solve() {
+    reset();
     buildMNAMatrix();
     
     if (matrixSize == 0) {
@@ -485,4 +504,10 @@ void DCAnalysis::printMatrix() const {
         std::cout << "| " << std::setw(8) << std::fixed << std::setprecision(3) << b[i] << std::endl;
     }
     std::cout << std::endl;
+}
+
+void DCAnalysis::reset() {
+    G.assign(matrixSize, std::vector<double>(matrixSize, 0.0));
+    b.assign(matrixSize, 0.0);
+    x.assign(matrixSize, 0.0);
 }
