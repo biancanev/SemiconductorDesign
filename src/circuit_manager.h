@@ -321,7 +321,7 @@ public:
             }
         }
         
-        netlist += ".tran 1n 1u\n.end\n";
+        netlist += ".end\n";
         return netlist;
     }
     

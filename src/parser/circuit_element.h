@@ -16,6 +16,8 @@ struct Pin {
 };
 
 class CircuitElement{
+protected:
+    int rotation = 0;
 public:
     std::string name;
     std::vector<Pin> pins;           // Vector of pins instead of node1, node2
@@ -35,6 +37,48 @@ public:
     
     // GUI helper methods
     void setPosition(float px, float py) { x = px; y = py; }
+    void rotate90() { 
+        rotation = (rotation + 90) % 360; 
+        updatePinPositions();
+    }
+    int getRotation() const { return rotation; }
+    void setRotation(int rot) { 
+        rotation = rot % 360; 
+        updatePinPositions();
+    }
+
+    // Update pin positions based on rotation
+    virtual void updatePinPositions() {
+        // Base implementation - derived classes can override for custom behavior
+        if (rotation == 0) return;  // No rotation needed
+        
+        for (auto& pin : pins) {
+            float original_x = pin.rel_x;
+            float original_y = pin.rel_y;
+            
+            switch (rotation) {
+                case 90:
+                    pin.rel_x = -original_y;
+                    pin.rel_y = original_x;
+                    break;
+                case 180:
+                    pin.rel_x = -original_x;
+                    pin.rel_y = -original_y;
+                    break;
+                case 270:
+                    pin.rel_x = original_y;
+                    pin.rel_y = -original_x;
+                    break;
+            }
+        }
+    }
+    
+    // Check if point is inside component bounds (for selection)
+    virtual bool isPointInside(float px, float py, float tolerance = 25.0f) const {
+        float dx = x - px;
+        float dy = y - py;
+        return (dx*dx + dy*dy) <= tolerance*tolerance;
+    }
     
     bool isAt(float px, float py, float tolerance = 20.0f) const {
         float dx = x - px, dy = y - py;
