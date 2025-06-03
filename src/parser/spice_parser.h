@@ -30,6 +30,9 @@ class SPICEParser{
         void parseResistor(const std::vector<std::string>& tokens);
         void parseCapacitor(const std::vector<std::string>& tokens);
         void parseVoltageSource(const std::vector<std::string>& tokens);
+        void parseInductor(const std::vector<std::string>& tokens);
+        void parseDiode(const std::vector<std::string>& tokens);
+        void parseMOSFET(const std::vector<std::string>& tokens);
         void printParsedElements();
         //void parseCurrentSource(const std::vector<std::string>& tokens);
         //void parseMOSFET(const std::vector<std::string>& tokens);

@@ -56,6 +56,7 @@ public:
     
     // Getters for specific time points
     std::vector<double> getNodeVoltageHistory(int node) const;
+    std::map<std::string, std::vector<double>> inductorCurrentHistory;
     std::vector<double> getTimePoints() const;
     
 private:
@@ -68,6 +69,10 @@ private:
     void addResistor(const Resistor* resistor);
     void addVoltageSource(const VoltageSource* vsource, double currentTime);
     void addCapacitor(const Capacitor* capacitor);
+    void addInductor(const Inductor* inductor);
+    void addDiodeTransient(const Diode* diode);
+    void addMOSFETTransient(const NMOSFET* mosfet);
+    void addPMOSFETTransient(const PMOSFET* pmos);
     
     void addMatrixEntry(int row, int col, double value);
     void saveTimePoint(double currentTime);
@@ -76,6 +81,7 @@ private:
     double getCapacitorCurrent(const Capacitor* cap, double v_current, double v_previous);
     double getCapacitorEquivalentConductance(const Capacitor* cap);
     double getCapacitorEquivalentCurrentSource(const Capacitor* cap, double v_previous);
+    double getInductorPreviousCurrent(const Inductor* inductor);
 };
 
 #endif

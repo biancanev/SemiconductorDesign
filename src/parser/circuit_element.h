@@ -261,5 +261,197 @@ public:
                std::to_string(pins[3].node_id) + " " + model;
     }
 };
+class Inductor: public CircuitElement{
+public:
+    double l;  // Inductance in Henries
+    
+    Inductor(const std::string& name, double l) : CircuitElement(name), l(l) {
+        pins.emplace_back("pin1", -15, 0);
+        pins.emplace_back("pin2", 15, 0);
+    }
+    
+    std::string getType() const override { return "inductor"; }
+    std::string getValue() const override { 
+        if (l >= 1.0) return std::to_string(static_cast<int>(l)) + "H";
+        if (l >= 1e-3) return std::to_string(static_cast<int>(l*1000)) + "mH";
+        if (l >= 1e-6) return std::to_string(static_cast<int>(l*1000000)) + "uH";
+        return std::to_string(l) + "H";
+    }
+    void setValue(const std::string& value) override { 
+        l = std::stod(value);
+    }
+    
+    std::string toSpiceLine() const override {
+        return name + " " + std::to_string(pins[0].node_id) + " " + std::to_string(pins[1].node_id) + " " + std::to_string(l);
+    }
+};
+
+class Diode: public CircuitElement{
+public:
+    std::string model;
+    double Is = 1e-14;     // Saturation current
+    double n = 1.0;        // Ideality factor
+    double Vt = 0.026;     // Thermal voltage at room temp
+    
+    Diode(const std::string& name, const std::string& model = "D1N4148") 
+        : CircuitElement(name), model(model) {
+        pins.emplace_back("anode", -10, 0);
+        pins.emplace_back("cathode", 10, 0);
+    }
+    
+    std::string getType() const override { return "diode"; }
+    std::string getValue() const override { return model; }
+    void setValue(const std::string& value) override { model = value; }
+    
+    std::string toSpiceLine() const override {
+        return name + " " + std::to_string(pins[0].node_id) + " " + std::to_string(pins[1].node_id) + " " + model;
+    }
+    
+    // Diode I-V relationship: I = Is * (exp(V/(n*Vt)) - 1)
+    double getCurrent(double voltage) const {
+        if (voltage < -5.0 * n * Vt) {
+            return -Is;  // Reverse saturation
+        }
+        return Is * (std::exp(voltage / (n * Vt)) - 1.0);
+    }
+    
+    // Conductance = dI/dV
+    double getConductance(double voltage) const {
+        if (voltage < -5.0 * n * Vt) {
+            return 1e-12;  // Very small conductance in reverse
+        }
+        return (Is / (n * Vt)) * std::exp(voltage / (n * Vt));
+    }
+};
+
+class NMOSFET: public CircuitElement{
+public:
+    std::string model;
+    double W = 10e-6;      // Width in meters
+    double L = 1e-6;       // Length in meters  
+    double Vth = 0.7;      // Threshold voltage
+    double Kn = 100e-6;    // Process parameter (A/V²)
+    double lambda = 0.01;  // Channel length modulation
+    
+    NMOSFET(const std::string& name, const std::string& model = "NMOS") 
+        : CircuitElement(name), model(model) {
+        pins.emplace_back("drain", 0, -15);
+        pins.emplace_back("gate", -20, 0);
+        pins.emplace_back("source", 0, 15);
+        pins.emplace_back("bulk", 20, 0);  // Body/substrate
+    }
+    
+    std::string getType() const override { return "nmosfet"; }
+    std::string getValue() const override { 
+        return model + " W=" + std::to_string(W*1e6) + "u L=" + std::to_string(L*1e6) + "u"; 
+    }
+    void setValue(const std::string& value) override { model = value; }
+    
+    std::string toSpiceLine() const override {
+        return name + " " + std::to_string(pins[0].node_id) + " " + 
+               std::to_string(pins[1].node_id) + " " + std::to_string(pins[2].node_id) + " " + 
+               std::to_string(pins[3].node_id) + " " + model;
+    }
+    
+    // MOSFET operating regions
+    enum class Region { CUTOFF, TRIODE, SATURATION };
+    
+    Region getOperatingRegion(double Vgs, double Vds) const {
+        if (Vgs < Vth) return Region::CUTOFF;
+        if (Vds < (Vgs - Vth)) return Region::TRIODE;
+        return Region::SATURATION;
+    }
+    
+    // Drain current calculation
+    double getDrainCurrent(double Vgs, double Vds) const {
+        if (Vgs < Vth) return 0.0;  // Cutoff
+        
+        double beta = Kn * (W / L);
+        
+        if (Vds < (Vgs - Vth)) {
+            // Triode/Linear region
+            return beta * ((Vgs - Vth) * Vds - 0.5 * Vds * Vds) * (1 + lambda * Vds);
+        } else {
+            // Saturation region
+            return 0.5 * beta * (Vgs - Vth) * (Vgs - Vth) * (1 + lambda * Vds);
+        }
+    }
+    
+    // Transconductance gm = dId/dVgs
+    double getTransconductance(double Vgs, double Vds) const {
+        if (Vgs < Vth) return 0.0;
+        
+        double beta = Kn * (W / L);
+        
+        if (Vds < (Vgs - Vth)) {
+            // Triode region
+            return beta * Vds * (1 + lambda * Vds);
+        } else {
+            // Saturation region
+            return beta * (Vgs - Vth) * (1 + lambda * Vds);
+        }
+    }
+    
+    // Output conductance gds = dId/dVds
+    double getOutputConductance(double Vgs, double Vds) const {
+        if (Vgs < Vth) return 1e-12;  // Very small leakage
+        
+        double beta = Kn * (W / L);
+        
+        if (Vds < (Vgs - Vth)) {
+            // Triode region
+            return beta * (Vgs - Vth - Vds) * (1 + lambda * Vds) + 
+                   beta * ((Vgs - Vth) * Vds - 0.5 * Vds * Vds) * lambda;
+        } else {
+            // Saturation region
+            return 0.5 * beta * lambda * (Vgs - Vth) * (Vgs - Vth);
+        }
+    }
+};
+
+class PMOSFET: public CircuitElement{
+public:
+    std::string model;
+    double W = 20e-6;      // Width (typically larger for PMOS)
+    double L = 1e-6;       // Length
+    double Vth = -0.7;     // Threshold voltage (negative for PMOS)
+    double Kp = 50e-6;     // Process parameter (typically smaller than NMOS)
+    double lambda = 0.02;  // Channel length modulation
+    
+    PMOSFET(const std::string& name, const std::string& model = "PMOS") 
+        : CircuitElement(name), model(model) {
+        pins.emplace_back("drain", 0, -15);
+        pins.emplace_back("gate", -20, 0);
+        pins.emplace_back("source", 0, 15);
+        pins.emplace_back("bulk", 20, 0);
+    }
+    
+    std::string getType() const override { return "pmosfet"; }
+    std::string getValue() const override { 
+        return model + " W=" + std::to_string(W*1e6) + "u L=" + std::to_string(L*1e6) + "u"; 
+    }
+    void setValue(const std::string& value) override { model = value; }
+    
+    std::string toSpiceLine() const override {
+        return name + " " + std::to_string(pins[0].node_id) + " " + 
+               std::to_string(pins[1].node_id) + " " + std::to_string(pins[2].node_id) + " " + 
+               std::to_string(pins[3].node_id) + " " + model;
+    }
+    
+    // For PMOS, all voltages are typically referenced with opposite polarity
+    double getDrainCurrent(double Vsg, double Vsd) const {  // Note: source-gate, source-drain
+        if (Vsg < -Vth) return 0.0;  // Cutoff (Vth is negative)
+        
+        double beta = Kp * (W / L);
+        
+        if (Vsd < (Vsg + Vth)) {  // Vth is negative, so this is (Vsg - |Vth|)
+            // Triode region
+            return beta * ((Vsg + Vth) * Vsd - 0.5 * Vsd * Vsd) * (1 + lambda * Vsd);
+        } else {
+            // Saturation region
+            return 0.5 * beta * (Vsg + Vth) * (Vsg + Vth) * (1 + lambda * Vsd);
+        }
+    }
+};
 
 #endif

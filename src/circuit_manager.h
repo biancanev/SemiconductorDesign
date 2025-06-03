@@ -163,9 +163,15 @@ public:
             component = std::make_unique<VoltageSource>(name, 5.0);
         } else if (type == "ground") {
             component = std::make_unique<Ground>(name);
-        } else if (type == "npn") {
-            component = std::make_unique<NPNTransistor>(name);
-        } else if (type == "opamp") {
+        }else if (type == "inductor") {
+            component = std::make_unique<Inductor>(name, 1e-6);  // 1µH default
+        } else if (type == "diode") {
+            component = std::make_unique<Diode>(name);
+        } else if (type == "nmosfet") {
+            component = std::make_unique<NMOSFET>(name);
+        } else if (type == "pmosfet") {
+            component = std::make_unique<PMOSFET>(name);
+        }else if (type == "opamp") {
             component = std::make_unique<OpAmp>(name);
         } else {
             std::cerr << "Unknown component type: " << type << std::endl;
@@ -315,7 +321,7 @@ public:
             }
         }
         
-        netlist += ".op\n.end\n";
+        netlist += ".tran 1n 1u\n.end\n";
         return netlist;
     }
     
@@ -441,9 +447,10 @@ private:
         if (type == "inductor") return "L";
         if (type == "vsource") return "V";
         if (type == "isource") return "I";
-        if (type == "npn" || type == "pnp") return "Q";
-        if (type == "opamp" || type == "ic") return "U";
+        if (type == "inductor") return "L";
         if (type == "diode") return "D";
+        if (type == "nmosfet" || type == "pmosfet") return "M";
+        if (type == "opamp" || type == "ic") return "U";
         if (type == "ground") return "GND";
         return "X";
     }

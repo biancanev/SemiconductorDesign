@@ -19,6 +19,16 @@
 // Forward declaration
 void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* component);
 
+ImVec2 snapToGrid(ImVec2 pos, float grid_step){
+    return ImVec2(std::round(pos.x / grid_step) * grid_step, std::round(pos.y / grid_step) * grid_step);
+}
+
+struct WireSegment {
+    ImVec2 start;
+    ImVec2 end;
+};
+
+
 int main() {
     std::cout << "Starting SPICE Simulator with ImGui..." << std::endl;
     
@@ -62,13 +72,14 @@ int main() {
     ImVec2 wire_start_pos;
     ImVec2 current_mouse_pos;
     SPICEParser parser;
+    std::vector<WireSegment> current_wire_segments;
+    bool wire_horizontal_first = true;
     
     // Circuit management
     CircuitManager circuit;
     std::string current_netlist = "* Empty Circuit\n.end\n";
     std::string selected_component_type = "";
     bool placing_component = false;
-
     // Main loop
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -118,7 +129,24 @@ int main() {
                 selected_component_type = "capacitor";
                 placing_component = true;
             }
-            
+            if (ImGui::Button("Inductor", ImVec2(100, 30))) {
+                selected_component_type = "inductor";
+                placing_component = true;
+            }
+
+            if (ImGui::Button("Diode", ImVec2(100, 30))) {
+                selected_component_type = "diode";
+                placing_component = true;
+            }
+
+            if (ImGui::Button("NMOS", ImVec2(100, 30))) {
+                selected_component_type = "nmosfet";
+                placing_component = true;
+            }
+            if (ImGui::Button("PMOS", ImVec2(100, 30))) {
+                selected_component_type = "pmosfet";
+                placing_component = true;
+            }
             if (ImGui::Button("DC Voltage", ImVec2(100, 30))) {
                 selected_component_type = "vsource";
                 placing_component = true;
@@ -196,20 +224,37 @@ int main() {
                 float rel_x = mouse_pos.x - canvas_p0.x;
                 float rel_y = mouse_pos.y - canvas_p0.y;
                 
-                if (wire_mode) {
-                    // Wire mode - try to connect pins
+                if (placing_component) {
+                    // Component placement mode with grid snapping - THIS SHOULD COME FIRST
+                    ImVec2 snapped_pos = snapToGrid(ImVec2(rel_x, rel_y), grid_step);
+                    
+                    std::cout << "Attempting to place component: " << selected_component_type << std::endl;
+                    
+                    CircuitElement* new_component = circuit.addComponent(selected_component_type, snapped_pos.x, snapped_pos.y);
+                    if (new_component) {
+                        current_netlist = circuit.generateNetlist();
+                        std::cout << "Added " << new_component->name << " at (" << snapped_pos.x << ", " << snapped_pos.y << ")" << std::endl;
+                    } else {
+                        std::cout << "Failed to add component: " << selected_component_type << std::endl;
+                    }
+                    placing_component = false;
+                    selected_component_type = "";
+                } else if (wire_mode) {
+                    // Wire mode - enhanced routing - ONLY when NOT placing components
                     auto [component, pin] = circuit.findPinAt(rel_x, rel_y);
                     
                     if (component && pin != -1) {
+                        // Clicked on a pin
                         if (!wire_start_component) {
                             // Start a new wire
                             wire_start_component = component;
                             wire_start_pin = pin;
                             auto pins = component->getAbsolutePinPositions();
                             wire_start_pos = ImVec2(canvas_p0.x + pins[pin].first, canvas_p0.y + pins[pin].second);
+                            current_wire_segments.clear();
                             std::cout << "Starting wire from " << component->name << " pin " << pin << std::endl;
                         } else {
-                            // Complete the wire
+                            // Complete the wire - connect to end pin
                             if (circuit.connectPins(wire_start_component, wire_start_pin, component, pin)) {
                                 current_netlist = circuit.generateNetlist();
                                 std::cout << "Wire completed!" << std::endl;
@@ -218,25 +263,45 @@ int main() {
                             }
                             wire_start_component = nullptr;
                             wire_start_pin = -1;
+                            current_wire_segments.clear();
                         }
+                    } else if (wire_start_component) {
+                        // Clicked on empty space while routing - add a waypoint and switch direction
+                        ImVec2 snapped_click = snapToGrid(ImVec2(rel_x, rel_y), grid_step);
+                        ImVec2 snapped_click_canvas = ImVec2(canvas_p0.x + snapped_click.x, canvas_p0.y + snapped_click.y);
+                        
+                        ImVec2 current_start = current_wire_segments.empty() ? wire_start_pos : current_wire_segments.back().end;
+                        
+                        // Calculate the corner point based on current direction preference
+                        ImVec2 corner_point;
+                        if (wire_horizontal_first) {
+                            // Go horizontal first, then vertical
+                            corner_point = ImVec2(snapped_click_canvas.x, current_start.y);
+                        } else {
+                            // Go vertical first, then horizontal
+                            corner_point = ImVec2(current_start.x, snapped_click_canvas.y);
+                        }
+                        
+                        // Add segments to reach the clicked point
+                        if (corner_point.x != current_start.x || corner_point.y != current_start.y) {
+                            current_wire_segments.push_back({current_start, corner_point});
+                        }
+                        if (corner_point.x != snapped_click_canvas.x || corner_point.y != snapped_click_canvas.y) {
+                            current_wire_segments.push_back({corner_point, snapped_click_canvas});
+                        }
+                        
+                        // Switch direction preference for next segment
+                        wire_horizontal_first = !wire_horizontal_first;
+                        
+                        std::cout << "Added wire waypoint at (" << snapped_click.x << ", " << snapped_click.y << ")" << std::endl;
                     } else {
-                        // Clicked on empty space - cancel wire
+                        // Clicked on empty space with no active wire - cancel any active wire
                         wire_start_component = nullptr;
                         wire_start_pin = -1;
+                        current_wire_segments.clear();
                     }
-                } else if (placing_component) {
-                    // Component placement mode
-                    rel_x = std::round(rel_x / grid_step) * grid_step;
-                    rel_y = std::round(rel_y / grid_step) * grid_step;
-                    
-                    CircuitElement* new_component = circuit.addComponent(selected_component_type, rel_x, rel_y);
-                    if (new_component) {
-                        current_netlist = circuit.generateNetlist();
-                        std::cout << "Added " << new_component->name << " at (" << rel_x << ", " << rel_y << ")" << std::endl;
-                    }
-                    placing_component = false;
-                    selected_component_type = "";
                 }
+                // If neither placing_component nor wire_mode, do nothing (just ignore the click)
             }
 
             // Draw wires
@@ -377,8 +442,8 @@ void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* 
         draw_list->AddLine(ImVec2(pos.x, pos.y + 15), ImVec2(pos.x, pos.y + 20), IM_COL32(255, 255, 255, 255), 2.0f);
         
         // Draw + and - symbols
-        draw_list->AddText(ImVec2(pos.x - 3, pos.y - 25), IM_COL32(255, 255, 255, 255), "+");
-        draw_list->AddText(ImVec2(pos.x - 3, pos.y + 15), IM_COL32(255, 255, 255, 255), "-");
+        draw_list->AddText(ImVec2(pos.x - 4, pos.y - 13), IM_COL32(255, 255, 255, 255), "+");
+        draw_list->AddText(ImVec2(pos.x - 4, pos.y - 2), IM_COL32(255, 255, 255, 255), "-");
         
         draw_list->AddText(ImVec2(pos.x - 10, pos.y - 35), IM_COL32(255, 255, 0, 255), component->name.c_str());
         draw_list->AddText(ImVec2(pos.x - 10, pos.y + 25), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
@@ -392,6 +457,79 @@ void drawComponent(ImDrawList* draw_list, ImVec2 canvas_offset, CircuitElement* 
         draw_list->AddLine(ImVec2(pos.x - 2, pos.y + 16), ImVec2(pos.x + 2, pos.y + 16), IM_COL32(255, 255, 255, 255), 2.0f);
         
         draw_list->AddText(ImVec2(pos.x - 10, pos.y - 20), IM_COL32(255, 255, 0, 255), component->name.c_str());
+        
+        drawPins(component, canvas_offset, draw_list);
+    }
+    else if (component->getType() == "inductor") {
+        // Draw inductor symbol (coil)
+        for (int i = 0; i < 3; i++) {
+            float center_x = pos.x - 15 + i * 10;
+            draw_list->AddCircle(ImVec2(center_x, pos.y), 5.0f, IM_COL32(255, 255, 255, 255), 8, 1.0f);
+        }
+        draw_list->AddLine(ImVec2(pos.x - 25, pos.y), ImVec2(pos.x - 20, pos.y), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x + 20, pos.y), ImVec2(pos.x + 25, pos.y), IM_COL32(255, 255, 255, 255), 2.0f);
+        
+        draw_list->AddText(ImVec2(pos.x - 10, pos.y - 20), IM_COL32(255, 255, 0, 255), component->name.c_str());
+        draw_list->AddText(ImVec2(pos.x - 10, pos.y + 10), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
+        
+        drawPins(component, canvas_offset, draw_list);
+    } else if (component->getType() == "diode") {
+        // Draw diode symbol (triangle with line)
+        ImVec2 points[3] = {
+            ImVec2(pos.x - 5, pos.y - 8),
+            ImVec2(pos.x - 5, pos.y + 8),
+            ImVec2(pos.x + 5, pos.y)
+        };
+        draw_list->AddPolyline(points, 3, IM_COL32(255, 255, 255, 255), true, 2.0f);
+        draw_list->AddLine(ImVec2(pos.x + 5, pos.y - 8), ImVec2(pos.x + 5, pos.y + 8), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x - 15, pos.y), ImVec2(pos.x - 5, pos.y), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x + 5, pos.y), ImVec2(pos.x + 15, pos.y), IM_COL32(255, 255, 255, 255), 2.0f);
+        
+        draw_list->AddText(ImVec2(pos.x - 10, pos.y - 25), IM_COL32(255, 255, 0, 255), component->name.c_str());
+        draw_list->AddText(ImVec2(pos.x - 15, pos.y + 15), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
+        
+        drawPins(component, canvas_offset, draw_list);
+    } else if (component->getType() == "nmosfet" || component->getType() == "pmosfet") {
+        // Draw MOSFET symbol
+        // Gate line
+        draw_list->AddLine(ImVec2(pos.x - 20, pos.y - 10), ImVec2(pos.x - 20, pos.y + 10), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x - 25, pos.y), ImVec2(pos.x - 20, pos.y), IM_COL32(255, 255, 255, 255), 2.0f);
+        
+        // Channel lines
+        draw_list->AddLine(ImVec2(pos.x - 15, pos.y - 8), ImVec2(pos.x - 15, pos.y - 3), IM_COL32(255, 255, 255, 255), 3.0f);
+        draw_list->AddLine(ImVec2(pos.x - 15, pos.y + 3), ImVec2(pos.x - 15, pos.y + 8), IM_COL32(255, 255, 255, 255), 3.0f);
+        
+        // Drain and source connections
+        draw_list->AddLine(ImVec2(pos.x - 15, pos.y - 5), ImVec2(pos.x, pos.y - 5), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x, pos.y - 5), ImVec2(pos.x, pos.y - 15), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x - 15, pos.y + 5), ImVec2(pos.x, pos.y + 5), IM_COL32(255, 255, 255, 255), 2.0f);
+        draw_list->AddLine(ImVec2(pos.x, pos.y + 5), ImVec2(pos.x, pos.y + 15), IM_COL32(255, 255, 255, 255), 2.0f);
+        
+        // Body connection
+        draw_list->AddLine(ImVec2(pos.x - 15, pos.y), ImVec2(pos.x + 15, pos.y), IM_COL32(255, 255, 255, 255), 1.0f);
+        draw_list->AddLine(ImVec2(pos.x + 15, pos.y), ImVec2(pos.x + 20, pos.y), IM_COL32(255, 255, 255, 255), 2.0f);
+        
+        // Arrow for NMOS vs PMOS
+        if (component->getType() == "nmosfet") {
+            // Arrow pointing in (substrate to channel)
+            ImVec2 arrow[3] = {
+                ImVec2(pos.x - 5, pos.y - 2),
+                ImVec2(pos.x - 5, pos.y + 2),
+                ImVec2(pos.x - 10, pos.y)
+            };
+            draw_list->AddPolyline(arrow, 3, IM_COL32(255, 255, 255, 255), true, 1.0f);
+        } else {
+            // Arrow pointing out (channel to substrate)
+            ImVec2 arrow[3] = {
+                ImVec2(pos.x - 10, pos.y - 2),
+                ImVec2(pos.x - 10, pos.y + 2),
+                ImVec2(pos.x - 5, pos.y)
+            };
+            draw_list->AddPolyline(arrow, 3, IM_COL32(255, 255, 255, 255), true, 1.0f);
+        }
+        
+        draw_list->AddText(ImVec2(pos.x - 15, pos.y - 30), IM_COL32(255, 255, 0, 255), component->name.c_str());
+        draw_list->AddText(ImVec2(pos.x - 20, pos.y + 20), IM_COL32(200, 200, 200, 255), component->getValue().c_str());
         
         drawPins(component, canvas_offset, draw_list);
     }

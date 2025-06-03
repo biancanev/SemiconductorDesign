@@ -243,6 +243,96 @@ void SPICEParser::parseVoltageSource(const std::vector<std::string>& tokens) {
     elements.push_back(std::move(vsource));
 }
 
+void SPICEParser::parseInductor(const std::vector<std::string>& tokens) {
+    if (tokens.size() < 4) {
+        std::cerr << "Invalid inductor specification" << std::endl;
+        return;
+    }
+    
+    std::string name = tokens[0];
+    std::string node1 = tokens[1];
+    std::string node2 = tokens[2];
+    std::string value = tokens[3];
+    
+    int n1 = getNodeNumber(node1);
+    int n2 = getNodeNumber(node2);
+    
+    double inductance = parseValue(value);
+    
+    std::cout << "Inductor " << name << ": " << n1 << " to " << n2 
+              << ", L=" << inductance << " henries" << std::endl;
+    
+    auto inductor = std::make_unique<Inductor>(name, inductance);
+    inductor->setNodeForPin(0, n1);
+    inductor->setNodeForPin(1, n2);
+    elements.push_back(std::move(inductor));
+}
+
+void SPICEParser::parseDiode(const std::vector<std::string>& tokens) {
+    if (tokens.size() < 4) {
+        std::cerr << "Invalid diode specification" << std::endl;
+        return;
+    }
+    
+    std::string name = tokens[0];
+    std::string anode = tokens[1];
+    std::string cathode = tokens[2];
+    std::string model = tokens[3];
+    
+    int n1 = getNodeNumber(anode);
+    int n2 = getNodeNumber(cathode);
+    
+    std::cout << "Diode " << name << ": " << n1 << " to " << n2 
+              << ", Model=" << model << std::endl;
+    
+    auto diode = std::make_unique<Diode>(name, model);
+    diode->setNodeForPin(0, n1);  // anode
+    diode->setNodeForPin(1, n2);  // cathode
+    elements.push_back(std::move(diode));
+}
+
+void SPICEParser::parseMOSFET(const std::vector<std::string>& tokens) {
+    if (tokens.size() < 6) {
+        std::cerr << "Invalid MOSFET specification" << std::endl;
+        return;
+    }
+    
+    std::string name = tokens[0];
+    std::string drain = tokens[1];
+    std::string gate = tokens[2];
+    std::string source = tokens[3];
+    std::string bulk = tokens[4];
+    std::string model = tokens[5];
+    
+    int nd = getNodeNumber(drain);
+    int ng = getNodeNumber(gate);
+    int ns = getNodeNumber(source);
+    int nb = getNodeNumber(bulk);
+    
+    std::cout << "MOSFET " << name << ": D=" << nd << " G=" << ng 
+              << " S=" << ns << " B=" << nb << ", Model=" << model << std::endl;
+    
+    // Determine if NMOS or PMOS based on model name
+    std::string lowerModel = model;
+    std::transform(lowerModel.begin(), lowerModel.end(), lowerModel.begin(), ::tolower);
+    
+    if (lowerModel.find("pmos") != std::string::npos || lowerModel.find("pfet") != std::string::npos) {
+        auto pmos = std::make_unique<PMOSFET>(name, model);
+        pmos->setNodeForPin(0, nd);  // drain
+        pmos->setNodeForPin(1, ng);  // gate
+        pmos->setNodeForPin(2, ns);  // source
+        pmos->setNodeForPin(3, nb);  // bulk
+        elements.push_back(std::move(pmos));
+    } else {
+        auto nmos = std::make_unique<NMOSFET>(name, model);
+        nmos->setNodeForPin(0, nd);  // drain
+        nmos->setNodeForPin(1, ng);  // gate
+        nmos->setNodeForPin(2, ns);  // source
+        nmos->setNodeForPin(3, nb);  // bulk
+        elements.push_back(std::move(nmos));
+    }
+}
+
 void SPICEParser::parseComponent(const std::vector<std::string>& tokens) {
     if (tokens.size() < 3) {
         std::cerr << "Invalid component line (too few tokens)" << std::endl;

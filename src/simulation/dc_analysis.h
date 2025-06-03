@@ -35,6 +35,9 @@ private:
     void addResistor(const Resistor* resistor);
     void addVoltageSource(const VoltageSource* vsource);
     void addCapacitor(const Capacitor* capacitor);
+    void addInductor(const Inductor* inductor);
+    void addDiode(const Diode* diode);
+    void addMOSFET(const NMOSFET* mosfet);
     
     void addMatrixEntry(int row, int col, double value);
     bool gaussianElimination();

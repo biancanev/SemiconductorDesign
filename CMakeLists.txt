@@ -57,3 +57,9 @@ target_compile_options(CircuitSimulator PRIVATE
     -Wall -Wextra 
     ${GLFW_CFLAGS_OTHER}
 )
+
+if (MSVC)
+    add_compile_options(/W0)
+else()
+    add_compile_options(-w)
+endif()
