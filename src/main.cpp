@@ -20,9 +20,21 @@
 #include <sstream>
 
 // ImGui includes
+#define IMGUI_DEFINE_MATH_OPERATORS 
 #include "../external/imgui/imgui.h"
+#include "../external/imgui/imgui_internal.h" 
 #include "../external/imgui/backends/imgui_impl_glfw.h"
 #include "../external/imgui/backends/imgui_impl_opengl3.h"
+
+// Force ImGui version consistency
+#if IMGUI_VERSION_NUM < 18700
+#error "This code requires ImGui 1.87 or higher"
+#endif
+
+// Ensure we're using the new key system
+#ifndef IMGUI_DISABLE_OBSOLETE_KEYIO
+#define IMGUI_DISABLE_OBSOLETE_KEYIO
+#endif
 
 #include "parser/spice_parser.h"
 #include "circuit_manager.h"
@@ -40,10 +52,9 @@ struct WireSegment {
     ImVec2 end;
 };
 
-// Simulation settings structures (renamed to avoid conflicts)
+// Simulation settings structures
 struct DCSimSettings {
     bool enabled = true;
-    // DC analysis doesn't need additional parameters
 };
 
 struct TransientSimSettings {
@@ -986,7 +997,7 @@ int main() {
                 placing_component = true;
             }
             
-            if (ImGui::Button("DC Voltage", ImVec2(-1, 30))) {
+            if (ImGui::Button("Voltage Source", ImVec2(-1, 30))) {
                 selected_component_type = "vsource";
                 placing_component = true;
             }
@@ -1019,7 +1030,7 @@ int main() {
             if (wire_mode) {
                 ImGui::TextColored(ImVec4(0, 1, 1, 1), "Wire Mode Active");
                 if (wire_start_component) {
-                    ImGui::TextColored(ImVec4(1, 1, 0, 1), "Click second pin");
+                    ImGui::TextColored(ImVec4(1, 1, 0, 1), "Click pin or wire");
                 } else {
                     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Click first pin");
                 }
@@ -1035,6 +1046,7 @@ int main() {
             ImGui::Text("Circuit Info:");
             ImGui::Text("Components: %zu", circuit.getComponents().size());
             ImGui::Text("Wires: %zu", circuit.getWires().size());
+            ImGui::Text("Junctions: %zu", circuit.getJunctions().size());
             ImGui::Text("Nodes: %d", circuit.getNodeCount());
             
             ImGui::End();
@@ -1115,7 +1127,7 @@ int main() {
 
             // Handle panning
             bool start_panning = (ImGui::IsItemClicked(ImGuiMouseButton_Middle)) || 
-                                (ImGui::IsItemClicked(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl));
+                                (ImGui::IsItemClicked(ImGuiMouseButton_Left) && ImGui::IsKeyDown(static_cast<ImGuiKey>(ImGuiKey_LeftCtrl)));
             
             if (start_panning && !panning) {
                 panning = true;
@@ -1126,7 +1138,7 @@ int main() {
             
             if (panning) {
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Middle) || 
-                (ImGui::IsMouseDown(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl))) {
+                (ImGui::IsMouseDown(static_cast<ImGuiMouseButton>(ImGuiMouseButton_Left)) && ImGui::IsKeyDown(static_cast<ImGuiKey>(ImGuiKey_LeftCtrl)))) {
                     ImVec2 mouse_delta = ImVec2(current_mouse_pos.x - pan_start_mouse_pos.x, 
                                             current_mouse_pos.y - pan_start_mouse_pos.y);
                     pan_offset.x = pan_start_offset.x + mouse_delta.x / zoom_level;
@@ -1148,7 +1160,7 @@ int main() {
             }
 
             // Check for keyboard shortcuts
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_Escape))) {
                 if (placing_component) {
                     // Cancel component placement
                     placing_component = false;
@@ -1170,17 +1182,44 @@ int main() {
             }
 
             // Handle rotation
-            if (ImGui::IsKeyPressed(ImGuiKey_R)) {
-                if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) && selected_component) {
-                    // Rotate selected component
-                    selected_component->rotate90();
-                    std::cout << "Rotated " << selected_component->name << " to " << selected_component->getRotation() << "°" << std::endl;
-                } else if (placing_component) {
-                    // Rotate preview component
-                    preview_rotation = (preview_rotation + 90) % 360;
-                    std::cout << "Preview rotation: " << preview_rotation << "°" << std::endl;
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_R))) {
+                if (ImGui::IsKeyDown(static_cast<ImGuiKey>(ImGuiKey_LeftCtrl))){
+                    if (selected_component) {
+                        // Rotate selected component
+                        selected_component->rotate90();
+                        std::cout << "Rotated " << selected_component->name << " to " << selected_component->getRotation() << "°" << std::endl;
+                    } else if (placing_component) {
+                        // Rotate preview component
+                        preview_rotation = (preview_rotation + 90) % 360;
+                        std::cout << "Preview rotation: " << preview_rotation << "°" << std::endl;
+                    }
+                } else {
+                    placing_component = true;
+                    selected_component_type = "resistor";
                 }
             }
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_C))) {
+                placing_component = true;
+                selected_component_type = "capacitor";
+            }
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_D))) {
+                placing_component = true;
+                selected_component_type = "diode";
+            }
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_L))) {
+                placing_component = true;
+                selected_component_type = "inductor";
+            }
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_G))) {
+                placing_component = true;
+                selected_component_type = "ground";
+            }
+            if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_W))) {
+                placing_component = false;
+                wire_mode = true;
+            }
+
+
 
             // Handle right-click for component editing
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
@@ -1206,7 +1245,7 @@ int main() {
             }
 
             // Handle left-click for selection and interaction
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !panning && !ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !panning && !ImGui::IsKeyDown(static_cast<ImGuiKey>(ImGuiKey_LeftCtrl))) {
                 ImVec2 mouse_world_pos = getMouseWorldPos(canvas_p0, zoom_level, pan_offset);
                 
                 if (placing_component) {
@@ -1231,11 +1270,14 @@ int main() {
                     show_component_preview = true;
                     
                 } else if (wire_mode) {
-                    // Wire mode - enhanced routing with multi-segment support
+                    // Wire mode - enhanced routing with multi-segment support and wire-to-wire connections
+                    // NOTE: I cheated and used Claude for wire management in the GUI because my code kept segfaulting.
+                    // I need to figure out how this code actually works.
                     auto [component, pin] = circuit.findPinAt(mouse_world_pos.x, mouse_world_pos.y);
+                    auto [existing_wire, intersection] = circuit.findWireAt(mouse_world_pos.x, mouse_world_pos.y);
                     
                     if (component && pin != -1) {
-                        // Clicked on a pin
+                        // Clicked on a component pin
                         if (!wire_start_component) {
                             // Start a new wire
                             wire_start_component = component;
@@ -1278,50 +1320,64 @@ int main() {
                             current_wire_segments.clear();
                             last_wire_point = ImVec2(0, 0);
                         }
-            } else if (wire_start_component) {
-                // Clicked on empty space while routing - add a waypoint
-                ImVec2 snapped_world_pos = snapToGrid(mouse_world_pos, base_grid_step);
-                ImVec2 snapped_screen_pos = worldToScreen(snapped_world_pos, canvas_p0, zoom_level, pan_offset);
-                
-                // Get the current start point for this segment
-                ImVec2 current_start_screen = current_wire_segments.empty() ? 
-                    wire_start_pos : current_wire_segments.back().end;
-                
-                // Calculate the corner point based on current direction preference
-                ImVec2 corner_point;
-                if (wire_horizontal_first) {
-                    // Go horizontal first, then vertical
-                    corner_point = ImVec2(snapped_screen_pos.x, current_start_screen.y);
-                } else {
-                    // Go vertical first, then horizontal
-                    corner_point = ImVec2(current_start_screen.x, snapped_screen_pos.y);
-                }
-                
-                // Add segments to reach the clicked point
-                if (std::abs(corner_point.x - current_start_screen.x) > 1.0f || 
-                    std::abs(corner_point.y - current_start_screen.y) > 1.0f) {
-                    current_wire_segments.push_back({current_start_screen, corner_point});
-                }
-                
-                if (std::abs(corner_point.x - snapped_screen_pos.x) > 1.0f || 
-                    std::abs(corner_point.y - snapped_screen_pos.y) > 1.0f) {
-                    current_wire_segments.push_back({corner_point, snapped_screen_pos});
-                }
-                
-                // Update last wire point for next preview
-                last_wire_point = snapped_world_pos;
-                
-                // Switch direction preference for next segment
-                wire_horizontal_first = !wire_horizontal_first;
-                
-                std::cout << "Added wire waypoint at (" << snapped_world_pos.x << ", " << snapped_world_pos.y << ")" << std::endl;
-            } else {
-                // Clicked on empty space with no active wire - cancel any active wire
-                wire_start_component = nullptr;
-                wire_start_pin = -1;
-                current_wire_segments.clear();
-                last_wire_point = ImVec2(0, 0);
-            }
+                    } else if (existing_wire && wire_start_component) {
+                        // Connect current wire to an existing wire (create junction)
+                        ImVec2 snapped_intersection = snapToGrid(ImVec2(intersection.x, intersection.y), base_grid_step);
+                        
+                        if (circuit.connectToWire(wire_start_component, wire_start_pin, 
+                                                 existing_wire, snapped_intersection.x, snapped_intersection.y)) {
+                            current_netlist = circuit.generateNetlist();
+                            std::cout << "Connected to existing wire at junction!" << std::endl;
+                        }
+                        
+                        wire_start_component = nullptr;
+                        wire_start_pin = -1;
+                        current_wire_segments.clear();
+                        last_wire_point = ImVec2(0, 0);
+                    } else if (wire_start_component) {
+                        // Clicked on empty space while routing - add a waypoint
+                        ImVec2 snapped_world_pos = snapToGrid(mouse_world_pos, base_grid_step);
+                        ImVec2 snapped_screen_pos = worldToScreen(snapped_world_pos, canvas_p0, zoom_level, pan_offset);
+                        
+                        // Get the current start point for this segment
+                        ImVec2 current_start_screen = current_wire_segments.empty() ? 
+                            wire_start_pos : current_wire_segments.back().end;
+                        
+                        // Calculate the corner point based on current direction preference
+                        ImVec2 corner_point;
+                        if (wire_horizontal_first) {
+                            // Go horizontal first, then vertical
+                            corner_point = ImVec2(snapped_screen_pos.x, current_start_screen.y);
+                        } else {
+                            // Go vertical first, then horizontal
+                            corner_point = ImVec2(current_start_screen.x, snapped_screen_pos.y);
+                        }
+                        
+                        // Add segments to reach the clicked point
+                        if (std::abs(corner_point.x - current_start_screen.x) > 1.0f || 
+                            std::abs(corner_point.y - current_start_screen.y) > 1.0f) {
+                            current_wire_segments.push_back({current_start_screen, corner_point});
+                        }
+                        
+                        if (std::abs(corner_point.x - snapped_screen_pos.x) > 1.0f || 
+                            std::abs(corner_point.y - snapped_screen_pos.y) > 1.0f) {
+                            current_wire_segments.push_back({corner_point, snapped_screen_pos});
+                        }
+                        
+                        // Update last wire point for next preview
+                        last_wire_point = snapped_world_pos;
+                        
+                        // Switch direction preference for next segment
+                        wire_horizontal_first = !wire_horizontal_first;
+                        
+                        std::cout << "Added wire waypoint at (" << snapped_world_pos.x << ", " << snapped_world_pos.y << ")" << std::endl;
+                    } else {
+                        // Clicked on empty space with no active wire - cancel any active wire
+                        wire_start_component = nullptr;
+                        wire_start_pin = -1;
+                        current_wire_segments.clear();
+                        last_wire_point = ImVec2(0, 0);
+                    }
                 } else {
                     // Normal mode - component selection and movement
                     CircuitElement* clicked_component = nullptr;
@@ -1383,27 +1439,67 @@ int main() {
                 drawComponentPreview(draw_list, preview_position, selected_component_type, preview_rotation, canvas_p0, zoom_level, pan_offset);
             }
 
+            // Draw wires with enhanced junction support
             for (const auto& wire : circuit.getWires()) {
-        auto complete_path = wire->getCompletePath();
-        
-        if (complete_path.size() >= 2) {
-            // Draw each segment of the wire path
-            for (size_t i = 0; i < complete_path.size() - 1; ++i) {
-                ImVec2 start_screen = worldToScreen(complete_path[i], canvas_p0, zoom_level, pan_offset);
-                ImVec2 end_screen = worldToScreen(complete_path[i + 1], canvas_p0, zoom_level, pan_offset);
-                
-                draw_list->AddLine(start_screen, end_screen, IM_COL32(0, 255, 0, 255), applyZoom(2.0f, zoom_level));
-            }
-            
-            // Draw small circles at waypoints (except start and end)
-            if (zoom_level > 0.5f) { // Only show waypoints when zoomed in enough
-                for (size_t i = 1; i < complete_path.size() - 1; ++i) {
-                    ImVec2 waypoint_screen = worldToScreen(complete_path[i], canvas_p0, zoom_level, pan_offset);
-                    draw_list->AddCircleFilled(waypoint_screen, applyZoom(3.0f, zoom_level), IM_COL32(0, 200, 0, 255));
+                try {
+                    auto complete_path = wire->getCompletePath();
+                    
+                    if (complete_path.size() >= 2) {
+                        // Draw each segment of the wire path
+                        for (size_t i = 0; i < complete_path.size() - 1; ++i) {
+                            ImVec2 start_screen = worldToScreen(complete_path[i], canvas_p0, zoom_level, pan_offset);
+                            ImVec2 end_screen = worldToScreen(complete_path[i + 1], canvas_p0, zoom_level, pan_offset);
+                            
+                            // Validate coordinates before drawing
+                            if (std::isfinite(start_screen.x) && std::isfinite(start_screen.y) &&
+                                std::isfinite(end_screen.x) && std::isfinite(end_screen.y) &&
+                                std::abs(start_screen.x) < 10000 && std::abs(start_screen.y) < 10000 &&
+                                std::abs(end_screen.x) < 10000 && std::abs(end_screen.y) < 10000) {
+                                
+                                draw_list->AddLine(start_screen, end_screen, IM_COL32(0, 255, 0, 255), applyZoom(2.0f, zoom_level));
+                            }
+                        }
+                        
+                        // Draw waypoints safely
+                        if (zoom_level > 0.5f && complete_path.size() > 2) {
+                            for (size_t i = 1; i < complete_path.size() - 1; ++i) {
+                                ImVec2 waypoint_screen = worldToScreen(complete_path[i], canvas_p0, zoom_level, pan_offset);
+                                if (std::isfinite(waypoint_screen.x) && std::isfinite(waypoint_screen.y) &&
+                                    std::abs(waypoint_screen.x) < 10000 && std::abs(waypoint_screen.y) < 10000) {
+                                    draw_list->AddCircleFilled(waypoint_screen, applyZoom(3.0f, zoom_level), IM_COL32(0, 200, 0, 255));
+                                }
+                            }
+                        }
+                    }
+                } catch (...) {
+                    // Skip this wire if there's any problem
+                    std::cout << "Error drawing this wire" << std::endl;
+                    continue;
                 }
             }
-        }
-    }
+
+            // Draw junctions safely
+            for (const auto& junction : circuit.getJunctions()) {
+                try {
+                    ImVec2 junction_screen = worldToScreen(ImVec2(junction->x, junction->y), canvas_p0, zoom_level, pan_offset);
+                    float junction_radius = applyZoom(5.0f, zoom_level);
+                    
+                    if (junction_radius >= 1.0f && junction_radius < 50.0f &&
+                        std::isfinite(junction_screen.x) && std::isfinite(junction_screen.y) &&
+                        std::abs(junction_screen.x) < 10000 && std::abs(junction_screen.y) < 10000) {
+                        
+                        // Use different colors for ground vs regular junctions
+                        ImU32 junction_color = (junction->node_id == 0) ? IM_COL32(0, 0, 0, 255) : IM_COL32(255, 255, 0, 255);
+                        ImU32 border_color = (junction->node_id == 0) ? IM_COL32(255, 255, 255, 255) : IM_COL32(0, 0, 0, 255);
+                        
+                        draw_list->AddCircleFilled(junction_screen, junction_radius, junction_color);
+                        draw_list->AddCircle(junction_screen, junction_radius, border_color, 8, applyZoom(2.0f, zoom_level));
+                    }
+                } catch (...) {
+                    // Skip this junction if there's any problem
+                    continue;
+                }
+            }
 
             // Draw wire segments while routing (in-progress segments)
             for (const auto& segment : current_wire_segments) {
@@ -1420,169 +1516,206 @@ int main() {
                 ImVec2 snapped_world_pos = snapToGrid(mouse_world_pos, base_grid_step);
                 ImVec2 snapped_screen_pos = worldToScreen(snapped_world_pos, canvas_p0, zoom_level, pan_offset);
                 
-                // Draw preview of the current segment being routed
-                ImVec2 corner_point;
-                if (wire_horizontal_first) {
-                    corner_point = ImVec2(snapped_screen_pos.x, current_start.y);
-                } else {
-                    corner_point = ImVec2(current_start.x, snapped_screen_pos.y);
-                }
-                
-                // Draw the preview segments
-                if (std::abs(corner_point.x - current_start.x) > 1.0f || 
-                    std::abs(corner_point.y - current_start.y) > 1.0f) {
-                    draw_list->AddLine(current_start, corner_point, IM_COL32(255, 255, 0, 128), applyZoom(2.0f, zoom_level));
-                }
-                
-                if (std::abs(corner_point.x - snapped_screen_pos.x) > 1.0f || 
-                    std::abs(corner_point.y - snapped_screen_pos.y) > 1.0f) {
-                    draw_list->AddLine(corner_point, snapped_screen_pos, IM_COL32(255, 255, 0, 128), applyZoom(2.0f, zoom_level));
-                }
-            }
-            
-            // Draw zoom level indicator
-            std::string zoom_text = "Zoom: " + std::to_string((int)(zoom_level * 100)) + "%";
-            draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p1.y - 45), IM_COL32(255, 255, 255, 200), zoom_text.c_str());
-            
-            // Draw pan offset indicator
-            std::string pan_text = "Pan: (" + std::to_string((int)pan_offset.x) + ", " + std::to_string((int)pan_offset.y) + ")";
-            draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p1.y - 25), IM_COL32(255, 255, 255, 200), pan_text.c_str());
-            
-            // Draw mode indicator
-            if (placing_component) {
-                std::string mode_text = "Placing: " + selected_component_type;
-                if (preview_rotation != 0) {
-                    mode_text += " (" + std::to_string(preview_rotation) + "°)";
-                }
-                draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p0.y + 10), IM_COL32(255, 255, 0, 255), mode_text.c_str());
-            } else if (wire_mode) {
-                std::string mode_text = wire_start_component ? "Wire: Click second pin" : "Wire: Click first pin";
-                draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p0.y + 10), IM_COL32(0, 255, 255, 255), mode_text.c_str());
-            } else if (selected_component) {
-                std::string mode_text = "Selected: " + selected_component->name;
-                draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p0.y + 10), IM_COL32(255, 255, 0, 255), mode_text.c_str());
-            }
-            
-            ImGui::End();
-        }
+                // Check if we're hovering over an existing wire
+                auto [preview_wire, preview_intersection] = circuit.findWireAt(mouse_world_pos.x, mouse_world_pos.y);
+               
+               if (preview_wire) {
+                   // Highlight the wire that would be connected to
+                   auto preview_complete_path = preview_wire->getCompletePath();
+                   for (size_t i = 0; i < preview_complete_path.size() - 1; ++i) {
+                       ImVec2 start_screen = worldToScreen(preview_complete_path[i], canvas_p0, zoom_level, pan_offset);
+                       ImVec2 end_screen = worldToScreen(preview_complete_path[i + 1], canvas_p0, zoom_level, pan_offset);
+                       
+                       draw_list->AddLine(start_screen, end_screen, IM_COL32(255, 255, 0, 150), applyZoom(4.0f, zoom_level));
+                   }
+                   
+                   // Draw preview junction point
+                   ImVec2 snapped_intersection = snapToGrid(ImVec2(preview_intersection.x, preview_intersection.y), base_grid_step);
+                   ImVec2 junction_preview_screen = worldToScreen(snapped_intersection, canvas_p0, zoom_level, pan_offset);
+                   draw_list->AddCircleFilled(junction_preview_screen, applyZoom(6.0f, zoom_level), IM_COL32(255, 255, 0, 200));
+                   draw_list->AddCircle(junction_preview_screen, applyZoom(6.0f, zoom_level), IM_COL32(255, 255, 255, 255), 8, applyZoom(2.0f, zoom_level));
+                   
+                   // Draw wire from current position to junction
+                   draw_list->AddLine(current_start, junction_preview_screen, IM_COL32(255, 255, 0, 128), applyZoom(2.0f, zoom_level));
+               } else {
+                   // Draw preview of the current segment being routed (normal waypoint mode)
+                   ImVec2 corner_point;
+                   if (wire_horizontal_first) {
+                       corner_point = ImVec2(snapped_screen_pos.x, current_start.y);
+                   } else {
+                       corner_point = ImVec2(current_start.x, snapped_screen_pos.y);
+                   }
+                   
+                   // Draw the preview segments
+                   if (std::abs(corner_point.x - current_start.x) > 1.0f || 
+                       std::abs(corner_point.y - current_start.y) > 1.0f) {
+                       draw_list->AddLine(current_start, corner_point, IM_COL32(255, 255, 0, 128), applyZoom(2.0f, zoom_level));
+                   }
+                   
+                   if (std::abs(corner_point.x - snapped_screen_pos.x) > 1.0f || 
+                       std::abs(corner_point.y - snapped_screen_pos.y) > 1.0f) {
+                       draw_list->AddLine(corner_point, snapped_screen_pos, IM_COL32(255, 255, 0, 128), applyZoom(2.0f, zoom_level));
+                   }
+               }
+           }
+           
+           // Draw zoom level indicator
+           std::string zoom_text = "Zoom: " + std::to_string((int)(zoom_level * 100)) + "%";
+           draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p1.y - 65), IM_COL32(255, 255, 255, 200), zoom_text.c_str());
+           
+           // Draw pan offset indicator
+           std::string pan_text = "Pan: (" + std::to_string((int)pan_offset.x) + ", " + std::to_string((int)pan_offset.y) + ")";
+           draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p1.y - 45), IM_COL32(255, 255, 255, 200), pan_text.c_str());
+           
+           // Draw mode indicator
+           if (placing_component) {
+               std::string mode_text = "Placing: " + selected_component_type;
+               if (preview_rotation != 0) {
+                   mode_text += " (" + std::to_string(preview_rotation) + "°)";
+               }
+               draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p0.y + 10), IM_COL32(255, 255, 0, 255), mode_text.c_str());
+           } else if (wire_mode) {
+               std::string mode_text;
+               if (wire_start_component) {
+                   mode_text = "Wire: Click pin/wire or waypoint";
+               } else {
+                   mode_text = "Wire: Click first pin";
+               }
+               draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p0.y + 10), IM_COL32(0, 255, 255, 255), mode_text.c_str());
+           } else if (selected_component) {
+               std::string mode_text = "Selected: " + selected_component->name;
+               draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p0.y + 10), IM_COL32(255, 255, 0, 255), mode_text.c_str());
+           }
+           
+           // Draw junction count for debugging
+           if (circuit.getJunctions().size() > 0) {
+               std::string junction_text = "Junctions: " + std::to_string(circuit.getJunctions().size());
+               draw_list->AddText(ImVec2(canvas_p0.x + 10, canvas_p1.y - 25), IM_COL32(255, 255, 0, 200), junction_text.c_str());
+           }
+           
+           ImGui::End();
+       }
 
-        // Show component edit dialog
-        ShowComponentEditDialog(editing_component, &show_component_edit_dialog, edit_name_buffer, edit_value_buffer);
+       // Show component edit dialog
+       ShowComponentEditDialog(editing_component, &show_component_edit_dialog, edit_name_buffer, edit_value_buffer);
 
-        // Show simulation dialog  
-        ShowSimulationDialog(simConfig, &show_simulation_dialog);
+       // Show simulation dialog  
+       ShowSimulationDialog(simConfig, &show_simulation_dialog);
 
-        // Netlist Editor Window
-        if (show_netlist_editor) {
-            ImGui::Begin("Netlist Editor", &show_netlist_editor);
-            
-            ImGui::Text("Generated SPICE Netlist:");
-            ImGui::Separator();
-            
-            std::string display_netlist = generateNetlistWithSettings(circuit, simConfig);
-            ImGui::TextWrapped("%s", display_netlist.c_str());
-            
-            ImGui::End();
-        }
+       // Netlist Editor Window
+       if (show_netlist_editor) {
+           ImGui::Begin("Netlist Editor", &show_netlist_editor);
+           
+           ImGui::Text("Generated SPICE Netlist:");
+           ImGui::Separator();
+           
+           std::string display_netlist = generateNetlistWithSettings(circuit, simConfig);
+           ImGui::TextWrapped("%s", display_netlist.c_str());
+           
+           ImGui::End();
+       }
 
-        ShowDCResultsDialog(&show_dc_results_dialog, current_dc_analysis, circuit, dc_error_messages);
+       // Show DC results dialog
+       ShowDCResultsDialog(&show_dc_results_dialog, current_dc_analysis, circuit, dc_error_messages);
 
-        if(simulate){
-            // Run and show simulation results
-            std::cout << "Starting simulation..." << std::endl;
-            
-            try {
-                // Clear previous results
-                dc_error_messages.clear();
-                current_dc_analysis = nullptr;
-                
-                // Validate circuit first
-                auto validation_errors = circuit.validateCircuit();
-                if (!validation_errors.empty()) {
-                    std::cout << "Circuit validation warnings:" << std::endl;
-                    for (const auto& error : validation_errors) {
-                        std::cout << "  " << error << std::endl;
-                        dc_error_messages.push_back(error);
-                    }
-                }
-                
-                // Generate netlist with current simulation settings
-                std::string netlist_with_sim = generateNetlistWithSettings(circuit, simConfig);
-                current_netlist = netlist_with_sim;
-                
-                // Create a temporary netlist file
-                std::ofstream temp_file("temp_circuit.cir");
-                temp_file << netlist_with_sim;
-                temp_file.close();
-                
-                // Parse the circuit
-                parser.parseFile("temp_circuit.cir");
-                parser.printParsedElements();
-                
-                // Run DC analysis if enabled
-                if (simConfig.dc.enabled) {
-                    std::cout << "Running DC analysis..." << std::endl;
-                    
-                    // Create a new DC analysis instance
-                    static DCAnalysis dc_analysis_instance(const_cast<std::vector<std::unique_ptr<CircuitElement>>&>(parser.getElements()), parser.getNumNodes());
-                    current_dc_analysis = &dc_analysis_instance;
-                    
-                    // Run the analysis
-                    current_dc_analysis->solve();
-                    
-                    // Show results dialog
-                    show_dc_results_dialog = true;
-                }
-                
-                // Run other analysis types based on settings
-                if (simConfig.transient.enabled) {
-                    std::cout << "Transient analysis would run here..." << std::endl;
-                    // TODO: Implement transient analysis results dialog
-                }
-                
-                if (simConfig.ac.enabled) {
-                    std::cout << "AC analysis would run here..." << std::endl;
-                    // TODO: Implement AC analysis results dialog
-                }
-                
-                if (simConfig.dcSweep.enabled) {
-                    std::cout << "DC sweep analysis would run here..." << std::endl;
-                    // TODO: Implement DC sweep results dialog
-                }
-                
-                std::cout << "Simulation completed successfully!" << std::endl;
-                
-                // Clean up temporary file
-                std::remove("temp_circuit.cir");
-                
-            } catch (const std::exception& e) {
-                std::cerr << "Simulation error: " << e.what() << std::endl;
-                dc_error_messages.push_back("Simulation error: " + std::string(e.what()));
-                show_dc_results_dialog = true; // Show dialog with error
-            }
-            simulate = false;
-        }
+       // Handle simulation
+       if(simulate){
+           // Run and show simulation results
+           std::cout << "Starting simulation..." << std::endl;
+           
+           try {
+               // Clear previous results
+               dc_error_messages.clear();
+               current_dc_analysis = nullptr;
+               
+               // Validate circuit first
+               auto validation_errors = circuit.validateCircuit();
+               if (!validation_errors.empty()) {
+                   std::cout << "Circuit validation warnings:" << std::endl;
+                   for (const auto& error : validation_errors) {
+                       std::cout << "  " << error << std::endl;
+                       dc_error_messages.push_back(error);
+                   }
+               }
+               
+               // Generate netlist with current simulation settings
+               std::string netlist_with_sim = generateNetlistWithSettings(circuit, simConfig);
+               current_netlist = netlist_with_sim;
+               
+               // Create a temporary netlist file
+               std::ofstream temp_file("temp_circuit.cir");
+               temp_file << netlist_with_sim;
+               temp_file.close();
+               
+               // Parse the circuit
+               parser.parseFile("temp_circuit.cir");
+               parser.printParsedElements();
+               
+               // Run DC analysis if enabled
+               if (simConfig.dc.enabled) {
+                   std::cout << "Running DC analysis..." << std::endl;
+                   
+                   // Create a new DC analysis instance
+                   static DCAnalysis dc_analysis_instance(const_cast<std::vector<std::unique_ptr<CircuitElement>>&>(parser.getElements()), parser.getNumNodes());
+                   current_dc_analysis = &dc_analysis_instance;
+                   
+                   // Run the analysis
+                   current_dc_analysis->solve();
+                   
+                   // Show results dialog
+                   show_dc_results_dialog = true;
+               }
+               
+               // Run other analysis types based on settings
+               if (simConfig.transient.enabled) {
+                   std::cout << "Transient analysis would run here..." << std::endl;
+                   // TODO: Implement transient analysis results dialog
+               }
+               
+               if (simConfig.ac.enabled) {
+                   std::cout << "AC analysis would run here..." << std::endl;
+                   // TODO: Implement AC analysis results dialog
+               }
+               
+               if (simConfig.dcSweep.enabled) {
+                   std::cout << "DC sweep analysis would run here..." << std::endl;
+                   // TODO: Implement DC sweep results dialog
+               }
+               
+               std::cout << "Simulation completed successfully!" << std::endl;
+               
+               // Clean up temporary file
+               std::remove("temp_circuit.cir");
+               
+           } catch (const std::exception& e) {
+               std::cerr << "Simulation error: " << e.what() << std::endl;
+               dc_error_messages.push_back("Simulation error: " + std::string(e.what()));
+               show_dc_results_dialog = true; // Show dialog with error
+           }
+           simulate = false;
+       }
 
-        // Rendering
-        ImGui::Render();
-        int display_w, display_h;
-        glfwGetFramebufferSize(window, &display_w, &display_h);
-        glViewport(0, 0, display_w, display_h);
-        glClearColor(0.45f, 0.55f, 0.60f, 1.00f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+       // Rendering
+       ImGui::Render();
+       int display_w, display_h;
+       glfwGetFramebufferSize(window, &display_w, &display_h);
+       glViewport(0, 0, display_w, display_h);
+       glClearColor(0.45f, 0.55f, 0.60f, 1.00f);
+       glClear(GL_COLOR_BUFFER_BIT);
+       ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-        glfwSwapBuffers(window);
-    }
+       glfwSwapBuffers(window);
+   }
 
-    // Cleanup
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
-    glfwTerminate();
+   // Cleanup
+   ImGui_ImplOpenGL3_Shutdown();
+   ImGui_ImplGlfw_Shutdown();
+   ImGui::DestroyContext();
+   glfwTerminate();
 
-    return 0;
+   return 0;
 }
+
 
 void drawPinsZoomed(CircuitElement* component, ImVec2 canvas_offset, ImDrawList* draw_list, float zoom, ImVec2 pan) {
     for (int i = 0; i < component->getPinCount(); ++i) {

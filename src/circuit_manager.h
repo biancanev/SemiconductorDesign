@@ -21,18 +21,29 @@ public:
     
     // Get start position in world coordinates
     std::pair<float, float> getStartPos() const {
-        auto pins = component1->getAbsolutePinPositions();
-        if (pin1 >= 0 && pin1 < static_cast<int>(pins.size())) {
-            return pins[pin1];
+        if (component1) {
+            auto pins = component1->getAbsolutePinPositions();
+            if (pin1 >= 0 && pin1 < static_cast<int>(pins.size())) {
+                return pins[pin1];
+            }
+        }
+        // If no component1, this might be a junction wire - return first path point or (0,0)
+        if (!path_points.empty()) {
+            return {path_points[0].x, path_points[0].y};
         }
         return {0, 0};
     }
-    
-    // Get end position in world coordinates
+
     std::pair<float, float> getEndPos() const {
-        auto pins = component2->getAbsolutePinPositions();
-        if (pin2 >= 0 && pin2 < static_cast<int>(pins.size())) {
-            return pins[pin2];
+        if (component2) {
+            auto pins = component2->getAbsolutePinPositions();
+            if (pin2 >= 0 && pin2 < static_cast<int>(pins.size())) {
+                return pins[pin2];
+            }
+        }
+        // If no component2, this might be a junction wire - return last path point or (0,0)
+        if (!path_points.empty()) {
+            return {path_points.back().x, path_points.back().y};
         }
         return {0, 0};
     }
@@ -41,20 +52,47 @@ public:
     std::vector<ImVec2> getCompletePath() const {
         std::vector<ImVec2> complete_path;
         
-        // Add start point
-        auto start = getStartPos();
-        complete_path.emplace_back(start.first, start.second);
-        
-        // Add intermediate points
-        for (const auto& point : path_points) {
-            complete_path.push_back(point);
+        try {
+            // Add start point (from component1)
+            if (component1) {
+                auto start = getStartPos();
+                complete_path.emplace_back(start.first, start.second);
+            }
+            
+            // Add intermediate points
+            for (const auto& point : path_points) {
+                complete_path.push_back(point);
+            }
+            
+            // Add end point (from component2, if it exists)
+            if (component2) {
+                auto end = getEndPos();
+                complete_path.emplace_back(end.first, end.second);
+            } else if (!path_points.empty()) {
+                // This is a junction wire - the last path point IS the endpoint
+                // Don't add it again since it's already in path_points
+                // But ensure we have at least 2 points for drawing
+                if (complete_path.size() == 1) {
+                    // If we only have the start point, duplicate the last path point
+                    complete_path.push_back(path_points.back());
+                }
+            }
+            
+            // Safety check - ensure we have at least 2 points for drawing
+            if (complete_path.size() < 2) {
+                if (complete_path.size() == 1) {
+                    complete_path.push_back(complete_path[0]);
+                } else {
+                    complete_path = {{0, 0}, {0, 0}};
+                }
+            }
+            
+            return complete_path;
+            
+        } catch (...) {
+            // Return safe default if anything goes wrong
+            return {{0, 0}, {0, 0}};
         }
-        
-        // Add end point
-        auto end = getEndPos();
-        complete_path.emplace_back(end.first, end.second);
-        
-        return complete_path;
     }
     
     // Get descriptive string for debugging
@@ -69,13 +107,70 @@ public:
     }
 };
 
+struct Junction{
+    int node_id;
+    float x, y;
+    std::vector<Wire*> connected_wires;
+
+    Junction(int node, float px, float py) : node_id(node), x(px), y(py) {}
+    
+    // Default constructor
+    Junction() : node_id(-1), x(0.0f), y(0.0f) {}
+};
+
 class CircuitManager {
 private:
     std::vector<std::unique_ptr<CircuitElement>> components;
     std::vector<std::unique_ptr<Wire>> wires;
+    std::vector<std::unique_ptr<Junction>> junctions;
     std::unordered_map<std::string, int> component_counters;
     std::unordered_set<int> used_nodes;
     int next_node_id = 1;  // 0 is reserved for ground
+    
+    bool isPointOnLineSegment(float px, float py, float x1, float y1, 
+                             float x2, float y2, float tolerance) {
+        // Calculate distance from point to line segment
+        float A = px - x1;
+        float B = py - y1;
+        float C = x2 - x1;
+        float D = y2 - y1;
+        
+        float dot = A * C + B * D;
+        float len_sq = C * C + D * D;
+        
+        if (len_sq == 0) return false; // Line segment has zero length
+        
+        float param = dot / len_sq;
+        
+        // Check if closest point is within the line segment
+        if (param < 0 || param > 1) return false;
+        
+        // Calculate closest point on line
+        float xx = x1 + param * C;
+        float yy = y1 + param * D;
+        
+        // Check if distance is within tolerance
+        float dx = px - xx;
+        float dy = py - yy;
+        return (dx * dx + dy * dy) <= tolerance * tolerance;
+    }
+    
+    ImVec2 getClosestPointOnLine(float px, float py, float x1, float y1, 
+                                float x2, float y2) {
+        float A = px - x1;
+        float B = py - y1;
+        float C = x2 - x1;
+        float D = y2 - y1;
+        
+        float dot = A * C + B * D;
+        float len_sq = C * C + D * D;
+        
+        float param = dot / len_sq;
+        param = std::max(0.0f, std::min(1.0f, param)); // Clamp to segment
+        
+        return ImVec2(x1 + param * C, y1 + param * D);
+    }
+
     
     // Helper to merge two nodes across all components
     void mergeNodes(int old_node, int new_node) {
@@ -115,6 +210,7 @@ private:
             for (int i = 0; i < component->getPinCount(); ++i) {
                 if (component->getNodeForPin(i) == node_id) {
                     component->setNodeForPin(i, 0);
+                    std::cout << "  Grounded " << component->name << " pin " << i << std::endl;
                 }
             }
         }
@@ -123,11 +219,22 @@ private:
         for (auto& wire : wires) {
             if (wire->node_id == node_id) {
                 wire->node_id = 0;
+                std::cout << "  Grounded wire: " << wire->getDescription() << std::endl;
+            }
+        }
+        
+        // Update junctions
+        for (auto& junction : junctions) {
+            if (junction->node_id == node_id) {
+                junction->node_id = 0;
+                std::cout << "  Grounded junction at (" << junction->x << ", " << junction->y << ")" << std::endl;
             }
         }
         
         used_nodes.erase(node_id);
         used_nodes.insert(0);
+        
+        std::cout << "Node " << node_id << " successfully grounded" << std::endl;
     }
     
     // Get all nodes connected to a specific node (for ground propagation)
@@ -171,6 +278,285 @@ public:
         component_counters["GND"] = 0; // Ground symbols
         
         used_nodes.insert(0);  // Ground is always present
+    }
+
+    bool connectToWire(CircuitElement* component, int pin, Wire* existing_wire, float junction_x, float junction_y) {
+        if (!component || !existing_wire) {
+            std::cerr << "Error: Invalid component or wire for junction connection" << std::endl;
+            return false;
+        }
+        
+        std::cout << "Connecting " << component->name << " pin " << pin 
+                << " to existing wire at (" << junction_x << ", " << junction_y << ")" << std::endl;
+        
+        // Get the existing wire's complete path and node
+        auto existing_path = existing_wire->getCompletePath();
+        int existing_node = existing_wire->node_id;
+        std::cout << "Existing wire has " << existing_path.size() << " path points and node " << existing_node << std::endl;
+        
+        // Determine the final node for this connection
+        int final_node;
+        if (component->getType() == "ground") {
+            final_node = 0;
+            std::cout << "Ground connection detected - will ground the network" << std::endl;
+        } else if (existing_node == 0) {
+            final_node = 0;
+            std::cout << "Connecting to already grounded wire" << std::endl;
+        } else {
+            final_node = existing_node;
+            std::cout << "Regular junction connection to node " << final_node << std::endl;
+        }
+        
+        // Handle grounding if needed
+        if (final_node == 0 && existing_node != 0) {
+            std::cout << "Grounding network..." << std::endl;
+            
+            for (auto& comp : components) {
+                for (int i = 0; i < comp->getPinCount(); ++i) {
+                    if (comp->getNodeForPin(i) == existing_node) {
+                        comp->setNodeForPin(i, 0);
+                        std::cout << "  Grounded " << comp->name << " pin " << i << std::endl;
+                    }
+                }
+            }
+            
+            for (auto& wire : wires) {
+                if (wire->node_id == existing_node) {
+                    wire->node_id = 0;
+                    std::cout << "  Grounded wire" << std::endl;
+                }
+            }
+            
+            for (auto& junction : junctions) {
+                if (junction->node_id == existing_node) {
+                    junction->node_id = 0;
+                    std::cout << "  Grounded junction" << std::endl;
+                }
+            }
+            
+            used_nodes.erase(existing_node);
+            used_nodes.insert(0);
+        }
+        
+        // Set the component's pin to the final node
+        component->setNodeForPin(pin, final_node);
+        std::cout << "Set " << component->name << " pin " << pin << " to node " << final_node << std::endl;
+        
+        try {
+            // STEP 1: Split the existing wire at the junction point
+            // Find where the junction point lies on the existing wire's path
+            ImVec2 junction_point(junction_x, junction_y);
+            int split_segment = -1;
+            float best_distance = std::numeric_limits<float>::max();
+            
+            // Find the closest segment to split
+            for (size_t i = 0; i < existing_path.size() - 1; ++i) {
+                ImVec2 seg_start = existing_path[i];
+                ImVec2 seg_end = existing_path[i + 1];
+                
+                if (isPointOnLineSegment(junction_x, junction_y, seg_start.x, seg_start.y, 
+                                    seg_end.x, seg_end.y, 8.0f)) {
+                    float dist = std::sqrt((junction_x - seg_start.x) * (junction_x - seg_start.x) +
+                                        (junction_y - seg_start.y) * (junction_y - seg_start.y)) +
+                            std::sqrt((junction_x - seg_end.x) * (junction_x - seg_end.x) +
+                                    (junction_y - seg_end.y) * (junction_y - seg_end.y));
+                    if (dist < best_distance) {
+                        best_distance = dist;
+                        split_segment = static_cast<int>(i);
+                    }
+                }
+            }
+            
+            if (split_segment == -1) {
+                std::cerr << "Could not find segment to split!" << std::endl;
+                return false;
+            }
+            
+            std::cout << "Splitting existing wire at segment " << split_segment << std::endl;
+            
+            // STEP 2: Create two new wires to replace the existing wire
+            std::vector<ImVec2> path1, path2;
+            
+            // Path1: from start to junction point
+            for (int i = 0; i <= split_segment; ++i) {
+                if (i < static_cast<int>(existing_path.size())) {
+                    path1.push_back(existing_path[i]);
+                }
+            }
+            // Add junction point if it's not already the last point
+            if (path1.empty() || 
+                (std::abs(path1.back().x - junction_x) > 1.0f || std::abs(path1.back().y - junction_y) > 1.0f)) {
+                path1.push_back(junction_point);
+            }
+            
+            // Path2: from junction point to end
+            path2.push_back(junction_point);
+            for (size_t i = split_segment + 1; i < existing_path.size(); ++i) {
+                path2.push_back(existing_path[i]);
+            }
+            
+            std::cout << "Created path1 with " << path1.size() << " points and path2 with " << path2.size() << " points" << std::endl;
+            
+            // STEP 3: Create replacement wires with preserved waypoints
+            
+            // Wire 1: from original start to junction
+            std::vector<ImVec2> wire1_waypoints;
+            if (path1.size() > 2) {
+                // Copy waypoints between start and junction (exclude endpoints)
+                for (size_t i = 1; i < path1.size() - 1; ++i) {
+                    wire1_waypoints.push_back(path1[i]);
+                }
+            }
+            
+            auto wire1 = std::make_unique<Wire>(existing_wire->component1, existing_wire->pin1, 
+                                            nullptr, -1, final_node, wire1_waypoints);
+            // Add the junction point as the final waypoint
+            if (!wire1_waypoints.empty() || path1.size() > 1) {
+                wire1->path_points.push_back(junction_point);
+            }
+            
+            // Wire 2: from junction to original end
+            std::vector<ImVec2> wire2_waypoints;
+            wire2_waypoints.push_back(junction_point); // Start with junction point
+            if (path2.size() > 2) {
+                // Copy waypoints between junction and end (exclude endpoints)
+                for (size_t i = 1; i < path2.size() - 1; ++i) {
+                    wire2_waypoints.push_back(path2[i]);
+                }
+            }
+            
+            auto wire2 = std::make_unique<Wire>(nullptr, -1, existing_wire->component2, 
+                                            existing_wire->pin2, final_node, wire2_waypoints);
+            
+            // STEP 4: Create the new component-to-junction wire
+            auto pin_positions = component->getAbsolutePinPositions();
+            ImVec2 component_pin_pos(pin_positions[pin].first, pin_positions[pin].second);
+            
+            std::vector<ImVec2> junction_wire_path;
+            float dx = junction_x - component_pin_pos.x;
+            float dy = junction_y - component_pin_pos.y;
+            if (dx*dx + dy*dy > 1.0f) {
+                junction_wire_path.push_back(junction_point);
+            }
+            
+            auto junction_wire = std::make_unique<Wire>(component, pin, nullptr, -1, final_node, junction_wire_path);
+            
+            // STEP 5: Create or find the junction
+            Junction* junction = nullptr;
+            for (auto& j : junctions) {
+                float dx = j->x - junction_x;
+                float dy = j->y - junction_y;
+                if (dx*dx + dy*dy < 4.0f) {
+                    junction = j.get();
+                    junction->node_id = final_node;
+                    std::cout << "Found existing junction, updated to node " << final_node << std::endl;
+                    break;
+                }
+            }
+            
+            if (!junction) {
+                auto new_junction = std::make_unique<Junction>(final_node, junction_x, junction_y);
+                junction = new_junction.get();
+                junctions.push_back(std::move(new_junction));
+                std::cout << "Created new junction at (" << junction_x << ", " << junction_y << ")" << std::endl;
+            }
+            
+            // STEP 6: Store wire pointers before moving them
+            Wire* wire1_ptr = wire1.get();
+            Wire* wire2_ptr = wire2.get();
+            Wire* junction_wire_ptr = junction_wire.get();
+            
+            // STEP 7: Remove the old wire and add the new ones
+            auto wire_it = std::find_if(wires.begin(), wires.end(), 
+                [existing_wire](const std::unique_ptr<Wire>& w) { return w.get() == existing_wire; });
+            
+            if (wire_it != wires.end()) {
+                wires.erase(wire_it);
+                std::cout << "Removed original wire" << std::endl;
+            }
+            
+            // Add the new wires
+            wires.push_back(std::move(wire1));
+            wires.push_back(std::move(wire2));
+            wires.push_back(std::move(junction_wire));
+            
+            // STEP 8: Update junction's connected wires
+            junction->connected_wires.clear(); // Clear and rebuild
+            junction->connected_wires.push_back(wire1_ptr);
+            junction->connected_wires.push_back(wire2_ptr);
+            junction->connected_wires.push_back(junction_wire_ptr);
+            
+            std::cout << "Junction connection completed successfully" << std::endl;
+            std::cout << "Junction now has " << junction->connected_wires.size() << " connected wires" << std::endl;
+            std::cout << "Wire1 waypoints: " << wire1_ptr->path_points.size() << std::endl;
+            std::cout << "Wire2 waypoints: " << wire2_ptr->path_points.size() << std::endl;
+            
+            return true;
+            
+        } catch (const std::exception& e) {
+            std::cerr << "Exception creating junction: " << e.what() << std::endl;
+            return false;
+        } catch (...) {
+            std::cerr << "Unknown exception creating junction" << std::endl;
+            return false;
+        }
+    }
+
+    std::pair<Wire*, ImVec2> findWireAt(float x, float y, float tolerance = 8.0f) {
+        for (auto& wire : wires) {
+            auto complete_path = wire->getCompletePath();
+            
+            // Check each segment of the wire path
+            for (size_t i = 0; i < complete_path.size() - 1; ++i) {
+                ImVec2 start = complete_path[i];
+                ImVec2 end = complete_path[i + 1];
+                
+                if (isPointOnLineSegment(x, y, start.x, start.y, end.x, end.y, tolerance)) {
+                    ImVec2 intersection = getClosestPointOnLine(x, y, start.x, start.y, end.x, end.y);
+                    return {wire.get(), intersection};
+                }
+            }
+        }
+        return {nullptr, ImVec2(0, 0)};
+    }
+    
+    int createJunctionNode(float x, float y, Wire* existing_wire) {
+        if (!existing_wire) {
+            std::cerr << "Error: Cannot create junction with null wire" << std::endl;
+            return -1;
+        }
+        
+        // Create new junction node
+        int junction_node = next_node_id++;
+        used_nodes.insert(junction_node);
+        
+        std::cout << "Creating junction node " << junction_node << " at (" << x << ", " << y << ")" << std::endl;
+        
+        // Create junction
+        auto junction = std::make_unique<Junction>(junction_node, x, y);
+        junction->connected_wires.push_back(existing_wire);
+        
+        // Don't merge nodes yet - just update the existing wire's node
+        // The mergeNodes call will happen when we connect the component
+        std::cout << "Junction created successfully with node " << junction_node << std::endl;
+        
+        Junction* junction_ptr = junction.get();
+        junctions.push_back(std::move(junction));
+        
+        return junction_node;
+    }
+    
+    Junction* findJunctionByNode(int node_id) {
+        for (auto& junction : junctions) {
+            if (junction->node_id == node_id) {
+                return junction.get();
+            }
+        }
+        return nullptr;
+    }
+    
+    const std::vector<std::unique_ptr<Junction>>& getJunctions() const {
+        return junctions;
     }
     
     // Add a component to the circuit
@@ -452,6 +838,7 @@ public:
     void clear() {
         components.clear();
         wires.clear();
+        junctions.clear();
         used_nodes.clear();
         used_nodes.insert(0);  // Ground always present
         
